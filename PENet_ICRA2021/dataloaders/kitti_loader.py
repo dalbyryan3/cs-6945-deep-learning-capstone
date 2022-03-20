@@ -106,6 +106,17 @@ def get_paths_and_transform(split, args):
         glob_rgb = os.path.join(
             args.data_folder,
             "data_depth_selection/test_depth_completion_anonymous/image/*.png")
+    elif split == "test_completion_flattened":
+        # transform = no_transform
+        transform = val_transform
+        glob_d = os.path.join(
+            args.data_folder,
+            "depth_images/*.png"
+        )
+        glob_gt = None  # "test_depth_completion_anonymous/"
+        glob_rgb = os.path.join(
+            args.data_folder,
+            "raw_images/*.png")
     elif split == "test_prediction":
         transform = no_transform
         glob_d = None

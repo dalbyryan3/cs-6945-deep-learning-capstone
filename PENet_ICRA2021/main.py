@@ -125,6 +125,8 @@ parser.add_argument('-f', '--freeze-backbone', action="store_true", default=Fals
                     help='freeze parameters in backbone')
 parser.add_argument('--test', action="store_true", default=False,
                     help='save result kitti test dataset for submission')
+parser.add_argument('--flattened', action="store_true", default=False,
+                    help='test dataset is flattened folder structure')
 parser.add_argument('--cpu', action="store_true", default=False, help='run on cpu')
 
 #random cropping
@@ -178,7 +180,7 @@ def iterate(mode, args, loader, model, optimizer, logger, epoch):
     meters = [block_average_meter, average_meter]
 
     # switch to appropriate mode
-    assert mode in ["train", "val", "eval", "test_prediction", "test_completion"], \
+    assert mode in ["train", "val", "eval", "test_prediction", "test_completion", "test_completion_flattened"], \
         "unsupported mode: {}".format(mode)
     if mode == 'train':
         model.train()
@@ -196,7 +198,7 @@ def iterate(mode, args, loader, model, optimizer, logger, epoch):
         }
 
         gt = batch_data[
-            'gt'] if mode != 'test_prediction' and mode != 'test_completion' else None
+            'gt'] if mode != 'test_prediction' and mode != 'test_completion' and mode != 'test_completion_flattened' else None
         data_time = time.time() - dstart
 
         pred = None
@@ -252,7 +254,7 @@ def iterate(mode, args, loader, model, optimizer, logger, epoch):
                 optimizer.step()
             print("loss:", loss, " epoch:", epoch, " ", i, "/", len(loader))
 
-        if mode == "test_completion":
+        if mode == "test_completion" or mode == 'test_completion_flattened':
             str_i = str(i)
             path_i = str_i.zfill(10) + '.png'
             path = os.path.join(args.data_folder_save, path_i)
@@ -264,7 +266,7 @@ def iterate(mode, args, loader, model, optimizer, logger, epoch):
         with torch.no_grad():
             mini_batch_size = next(iter(batch_data.values())).size(0)
             result = Result()
-            if mode != 'test_prediction' and mode != 'test_completion':
+            if mode != 'test_prediction' and mode != 'test_completion' and mode != 'test_completion_flattened':
                 result.evaluate(pred.data, gt.data, photometric_loss)
                 [
                     m.update(result, gpu_time, data_time, mini_batch_size)
@@ -376,14 +378,15 @@ def main():
     test_dataset = None
     test_loader = None
     if (args.test):
-        test_dataset = KittiDepth('test_completion', args)
+        test_completion_str = 'test_completion_flattened' if args.flattened else 'test_completion'
+        test_dataset = KittiDepth(test_completion_str, args)
         test_loader = torch.utils.data.DataLoader(
             test_dataset,
             batch_size=1,
             shuffle=False,
             num_workers=1,
             pin_memory=True)
-        iterate("test_completion", args, test_loader, model, None, logger, 0)
+        iterate(test_completion_str, args, test_loader, model, None, logger, 0)
         return
 
     val_dataset = KittiDepth('val', args)
