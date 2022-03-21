@@ -172,25 +172,25 @@ for raw_filepath in raw_filepaths:
 
 
 # %%
-depth_filepaths = depthmap_filepaths(os.path.join(kitti_depthflattened_data_path,'depth_images'), total_num_viz=5, imgs_per_viz=3000)
-raw_images_filepaths = depthmap_filepaths(os.path.join(kitti_depthflattened_data_path,'raw_images'), total_num_viz=5, imgs_per_viz=3000)
+depthflattened_filepaths = depthmap_filepaths(os.path.join(kitti_depthflattened_data_path,'depth_images'), total_num_viz=5, imgs_per_viz=3000)
+rawflattened_images_filepaths = depthmap_filepaths(os.path.join(kitti_depthflattened_data_path,'raw_images'), total_num_viz=5, imgs_per_viz=3000)
 
-for raw_image_filepath, depth_filepath in zip(raw_images_filepaths, depth_filepaths):
+for raw_image_filepath, depth_filepath in zip(rawflattened_images_filepaths, depthflattened_filepaths):
     print('raw: {0}\ndepth: {1}'.format(raw_image_filepath, depth_filepath))
+    raw_image = plt.imread(raw_image_filepath)
     print('raw image size: {0}'.format(raw_image.shape))
     basename = os.path.basename(raw_image_filepath)
     fig, (ax1, ax2) = plt.subplots(2,1)
     ax1.set_title('Raw Image {0}'.format(basename))
-    raw_image = plt.imread(raw_image_filepath)
     ax1.imshow(raw_image)
     ax2.set_title('Depth Image {0}'.format(basename))
     depthmap_viz(depth_filepath, ax2, should_print_size=True)
     plt.show()
 
 # %%
-raw_filepaths = depthmap_filepaths(os.path.join(kitti_depth_data_path, '/cs6945share/kitti_datasets/depth/data_depth_selection/test_depth_completion_anonymous/image/'))
-depth_filepaths = depthmap_filepaths(os.path.join(kitti_depth_data_path, '/cs6945share/kitti_datasets/depth/data_depth_selection/test_depth_completion_anonymous/velodyne_raw/'))
-for raw_filepath, depth_filepath in zip(raw_filepaths, depth_filepaths):
+rawtest_filepaths = depthmap_filepaths(os.path.join(kitti_depth_data_path, '/cs6945share/kitti_datasets/depth/data_depth_selection/test_depth_completion_anonymous/image/'))
+depthtest_filepaths = depthmap_filepaths(os.path.join(kitti_depth_data_path, '/cs6945share/kitti_datasets/depth/data_depth_selection/test_depth_completion_anonymous/velodyne_raw/'))
+for raw_filepath, depth_filepath in zip(rawtest_filepaths, depthtest_filepaths):
     print('raw: {0}\ndepth: {1}'.format(raw_filepath, depth_filepath))
     print('raw image size: {0}'.format(raw_image.shape))
     basename = os.path.basename(raw_filepath)
@@ -207,14 +207,19 @@ for raw_filepath, depth_filepath in zip(raw_filepaths, depth_filepaths):
 
 # %% [markdown]
 # # Depth Completion
+# **NOTE**: This task is not necessarily what will be used for crack size estimation (loss functions for single shot monocular depth often use sparse data_, but may be useful in the future for Blyncsy in going from raw collected Lidar to a full per-pixel depth map. 
+#
+#
 # Using PENet: Precise and Efficient Depth Completion
 # - https://arxiv.org/abs/2103.00783
 # - https://github.com/JUGGHM/PENet_ICRA2021
 
 # %%
 os.chdir('PENet_ICRA2021')
-pe = torch.load('pe.pth.tar')
-os.chdir('..')
+try:
+    pe = torch.load('pe.pth.tar')
+finally:
+    os.chdir('..')
 
 # %%
 pe_model = pe['model']
@@ -224,15 +229,25 @@ pe_model = pe['model']
 pe_net_src_root = 'PENet_ICRA2021'
 insert_to_path_if_necessary(pe_net_src_root)
 
-# %%
-os.chdir('PENet_ICRA2021')
-# !python main.py -b 1 -n pe --evaluate pe.pth.tar --data-folder /cs6945share/kitti_datasets/depth/ --data-folder-save /cs6945share/kitti_datasets/depth/data_pe_completed_depth --data-folder-rgb /cs6945share/kitti_datasets/raw/ --test
-os.chdir('..')
+# %% [markdown]
+# **WARNING the command below may take a while to run**
 
 # %%
 os.chdir('PENet_ICRA2021')
-# !python main.py -b 1 -n pe --evaluate pe.pth.tar --data-folder /cs6945share/kitti_datasets/depth_flattened --data-folder-save /cs6945share/kitti_datasets/depth/data_pe_completed_depth --test --flattened
-os.chdir('..')
+try:
+    # !python main.py -b 1 -n pe --evaluate pe.pth.tar --data-folder /cs6945share/kitti_datasets/depth/ --data-folder-save /cs6945share/kitti_datasets/depth/data_pe_completed_depth --data-folder-rgb /cs6945share/kitti_datasets/raw/ --test
+finally:
+    os.chdir('..')
+
+# %% [markdown]
+# **WARNING the command below may VERY long to run**
+
+# %%
+os.chdir('PENet_ICRA2021')
+try:
+    # !python main.py -b 1 -n pe --evaluate pe.pth.tar --data-folder /cs6945share/kitti_datasets/depth_flattened --data-folder-save /cs6945share/kitti_datasets/depth/data_pe_completed_depth --test --flattened
+finally:
+    os.chdir('..')
 
 # %% [markdown]
 # # Monocular Depth Estimation
@@ -243,5 +258,59 @@ os.chdir('..')
 # %%
 adabins_src_root = 'AdaBins'
 insert_to_path_if_necessary(adabins_src_root)
+from infer import InferenceHelper
+
+
+# %%
+def AdaBins_prediction_viz(kitti_depthflattened_data_path, viz_num=5, should_print_size=False):
+    flattened_rgb_path = os.path.join(kitti_depthflattened_data_path,'raw_images')
+    flattened_depth_path = os.path.join(kitti_depthflattened_data_path,'depth_images')
+    infer_helper = InferenceHelper(dataset='kitti')
+    flattened_rgb_glob = sorted(glob.glob(os.path.join(flattened_rgb_path, "*.png")))
+    flattened_depth_glob = sorted(glob.glob(os.path.join(flattened_depth_path, "*.png")))
+    flattened_rgbanddepth_glob = zip(flattened_rgb_glob, flattened_depth_glob)
+    for i, (raw_filepath, depth_filepath) in enumerate(sorted(flattened_rgbanddepth_glob, key=lambda k: random.random())):
+        if i > viz_num:
+            break
+        raw_img = Image.open(raw_filepath)
+        d_map = depth_read(depth_filepath)
+        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(30,5))
+
+        ax1.imshow(raw_img)
+        ax1.set_title('Raw Monocular RGB Image')
+        
+        sns.heatmap(d_map, cmap=sns.color_palette("Spectral_r", as_cmap=True), square=True, ax=ax2)
+        ax2.set_title('Depth Map Ground Truth (in meters)')
+
+        bin_centers, predicted_depth = infer_helper.predict_pil(raw_img)
+        d_map_pred = predicted_depth[0][0]
+#         ax3.imshow(d_map_pred, cmap='plasma')
+        sns.heatmap(d_map_pred, cmap=sns.color_palette("Spectral_r", as_cmap=True), square=True, ax=ax3)
+        ax3.set_title('Predicted Monocular Depth Map (in meters)')
+
+    
+        if should_print_size: 
+            print('raw image shape: {0}'.format(np.asarray(raw_img).shape))
+            print('depth map shape: {0}'.format(d_map.shape))
+            print('predicted depth map shape: {0}'.format(d_map_pred.shape))
+            
+        ax1.set_yticks([],[])
+        ax1.set_xticks([],[])
+        ax2.set_yticks([],[])
+        ax2.set_xticks([],[])
+        ax3.set_yticks([],[])
+        ax3.set_xticks([],[])
+        fig.tight_layout()
+        fig.show()
+        plt.show()
+
+# %%
+os.chdir('AdaBins')
+try:
+    AdaBins_prediction_viz(kitti_depthflattened_data_path, viz_num=5, should_print_size=True)
+finally:
+    os.chdir('..')
+
+# %%
 
 # %%
