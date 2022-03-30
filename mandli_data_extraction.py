@@ -22,7 +22,7 @@ import matplotlib.patches as patches
 import numpy as np
 import re
 
-mandli_data_test_dir_path = '../0008_+'
+mandli_data_test_dir_path = '/cs6945share/mandli_data/0008_+'
 
 # %% [markdown]
 # # Misc Notes
@@ -404,7 +404,7 @@ def get_name_list(mandli_data_dir_path, should_sort_by_name=True):
         name_list.sort()
     return name_list
         
-mandli_data_viz_labeling_helper('../0008_+', should_sort_by_name=True)
+mandli_data_viz_labeling_helper(mandli_data_test_dir_path, should_sort_by_name=True)
 
     
 
