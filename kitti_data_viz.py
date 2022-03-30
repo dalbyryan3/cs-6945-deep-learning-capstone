@@ -73,7 +73,7 @@ def insert_to_path_if_necessary(path):
 
 
 # %%
-kitti_root_path = os.path.abspath('../')
+kitti_root_path = os.path.abspath('/cs6945share/kitti_datasets')
 kitti_depth_data_path = os.path.join(kitti_root_path, 'depth')
 kitti_raw_data_path = os.path.join(kitti_root_path, 'raw')
 kitti_depthflattened_data_path = os.path.join(kitti_root_path, 'depth_flattened')
@@ -310,7 +310,3 @@ try:
     AdaBins_prediction_viz(kitti_depthflattened_data_path, viz_num=5, should_print_size=True)
 finally:
     os.chdir('..')
-
-# %%
-
-# %%
