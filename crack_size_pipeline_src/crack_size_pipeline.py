@@ -437,7 +437,7 @@ def draw_points(x, y, image, p):
         if color_index > 12:
             color_index = 12
         for index in range(len(i)):
-            image = cv.circle(image, (int(i[index]), int(j[index])), 5, p.color[color_index], -1)
+            image = cv.circle(image, (int(i[index]), int(j[index])), 10, p.color[color_index], -1)
     return image
 
 def PINet_predict_pil_anysize(pin_model, pil_img, device, p=PINet_params(), give_result_image=False):
@@ -448,7 +448,9 @@ def PINet_predict_pil_anysize(pin_model, pil_img, device, p=PINet_params(), give
 #     width = 512
 #     dummy_input = torch.randn(sample_batch_size, channel, height, width)
     img_arr = np.array(pil_img)
-    pil_img_resize = pil_img.resize((512, 256))
+    orig_xy_dims = tuple(reversed(img_arr.shape[:2])) # Flip dims to be in "xy" order
+    new_xy_dims = (512, 256)
+    pil_img_resize = pil_img.resize(new_xy_dims)
     img_arr_resize = np.asarray(pil_img_resize, dtype="float")/255
     PINet_input_tensor = torch.unsqueeze(torch.tensor(img_arr_resize, device=device).movedim(2,0).float(),0)
     
@@ -474,12 +476,127 @@ def PINet_predict_pil_anysize(pin_model, pil_img, device, p=PINet_params(), give
                 
     # sort points along y 
     in_x, in_y = sort_along_y(in_x, in_y)  
+    
 
+    # rescale in_x and in_y to be on original image dimensions
+    scale_factor_x = orig_xy_dims[0]/new_xy_dims[0]
+    scale_factor_y = orig_xy_dims[1]/new_xy_dims[1]
+    
+    scale_in_x = [[int(j*scale_factor_x) for j in i] for i in in_x]
+    scale_in_y = [[int(j*scale_factor_y) for j in i] for i in in_y]
     
     if give_result_image:
-        result_image = draw_points(in_x, in_y, deepcopy(img_arr_resize), p)
-        return in_x, in_y, result_image
-    return in_x, in_y
+        result_image = draw_points(scale_in_x, scale_in_y, deepcopy(img_arr), p)
+        return scale_in_x, scale_in_y, result_image
+
+    return scale_in_x, scale_in_y
+
+from sklearn.cluster import DBSCAN
+from sklearn.linear_model import LinearRegression
+import sklearn.metrics as metrics
+from sklearn.preprocessing import StandardScaler
+from skimage.transform import hough_line, hough_line_peaks,probabilistic_hough_line
+from skimage.feature import canny
+from skimage.color import rgb2gray
+from matplotlib import cm
+
+
+def get_lane_lines_linear_regression(x, y, y_min_max_tup=None):
+    line_parameters_list = []
+    for i, j in zip(x, y):
+        x_arr = np.array(i).reshape(-1, 1)
+        y_arr = np.array(j)
+        if y_min_max_tup is not None:
+            selected_idxs = np.logical_and(y_arr>y_min_max_tup[0], y_arr<y_min_max_tup[1])
+            x_arr = x_arr[selected_idxs]
+            y_arr = y_arr[selected_idxs]
+            if not x_arr.size > 0:
+                continue
+
+        
+#         cluster_arr = np.array((i,j)).T
+#         # Compute DBSCAN
+#         cluster_arr_norm = StandardScaler().fit_transform(cluster_arr)
+#         db = DBSCAN(eps=0.3, min_samples=2).fit(cluster_arr_norm)
+#         core_samples_mask = np.zeros_like(db.labels_, dtype=bool)
+#         core_samples_mask[db.core_sample_indices_] = True
+#         labels = db.labels_
+#         # Number of clusters in labels, ignoring noise if present.
+#         n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+#         n_noise_ = list(labels).count(-1)
+#         unique_labels = set(labels)
+    
+    
+        model = LinearRegression().fit(x_arr, y_arr)  
+        line_parameters_list.append((model.coef_.item(),model.intercept_.item()))
+    return line_parameters_list
+
+def get_lane_lines_hough_transform(x, y, lane_img_shape, y_min_max_tup=None):
+    line_parameters_list = []
+    for i, j in zip(x, y):
+        x_arr = np.array(i).reshape(-1, 1)
+        y_arr = np.array(j)
+        if y_min_max_tup is not None:
+            selected_idxs = np.logical_and(y_arr>y_min_max_tup[0], y_arr<y_min_max_tup[1])
+            x_arr = x_arr[selected_idxs]
+            y_arr = y_arr[selected_idxs]
+            if not x_arr.size > 0:
+                continue
+        background = np.zeros(lane_img_shape)
+        for index in range(len(y_arr)):
+            background = cv.circle(background, (int(x_arr[index,0]), int(y_arr[index])), 10, (255,255,255), -1)
+        background = rgb2gray(background)
+#         plt.figure()
+#         plt.imshow(background, cmap=cm.gray)
+        h, theta, d = hough_line(background)
+        for accum, angle, dist in zip(*hough_line_peaks(h, theta, d, min_distance=200, min_angle=30, threshold=100)):
+            y0 = (dist - 0 * np.cos(angle)) / np.sin(angle)
+            y1 = (dist - lane_img_shape[1] * np.cos(angle)) / np.sin(angle)
+#             plt.plot((0, lane_img_shape[1]), (y0, y1), '-r')
+            m = (y1-y0)/lane_img_shape[1]
+            b = y0
+            line_parameters_list.append((m,b))
+#         plt.show()
+
+    return line_parameters_list
+
+
+# %%
+test_blyncsy_image_filepath = blyncsy_image_filepaths[286]
+test_blyncsy_image_filepath = blyncsy_image_filepaths[155]
+test_blyncsy_image_filepath = blyncsy_image_filepaths[526]
+test_blyncsy_image_filepath = blyncsy_image_filepaths[524]
+
+test_blyncsy_pil_image = Image.open(test_blyncsy_image_filepath)
+PINet_p = PINet_params()
+PINet_p.threshold_point = 0.1
+PINet_p.threshold_instance = 1
+pin_model = lane_detection_network().to(device)
+pin_state_dict = torch.load(os.path.join(PINet_src_root, 'savefile/0_tensor(0.5242)_lane_detection_network.pkl'))
+pin_model.load_state_dict(pin_state_dict)
+with torch.no_grad():
+    pin_model.eval()
+    in_x, in_y, lane_detect_result_image = PINet_predict_pil_anysize(pin_model, test_blyncsy_pil_image, device, p=PINet_p, give_result_image=True)
+
+# plt.figure()
+# plt.imshow(lane_detect_result_image)
+# lane_lines = get_lane_lines_linear_regression(in_x,in_y, y_min_max_tup=(400, lane_detect_result_image.shape[0]-1))
+# x_vals = np.arange(lane_detect_result_image.shape[1], dtype=np.int)
+# for line in lane_lines:
+#     y_vals = line[0]*x_vals + line[1]
+#     idx_in_range = np.logical_and(y_vals < lane_detect_result_image.shape[0]-1, y_vals > 0)
+#     plt.plot(x_vals[idx_in_range], y_vals[idx_in_range])
+# plt.show()
+
+plt.figure()
+plt.imshow(lane_detect_result_image)
+lane_lines = get_lane_lines_hough_transform(in_x,in_y,lane_detect_result_image.shape,  y_min_max_tup=(400, lane_detect_result_image.shape[0]-1))
+x_vals = np.arange(lane_detect_result_image.shape[1], dtype=np.int)
+for line in lane_lines:
+    y_vals = line[0]*x_vals + line[1]
+    idx_in_range = np.logical_and(y_vals < lane_detect_result_image.shape[0]-1, y_vals > 0)
+    plt.plot(x_vals[idx_in_range], y_vals[idx_in_range])
+plt.show()
 
 
 # %% [markdown]
@@ -599,8 +716,8 @@ viz_pipeline(test_blyncsy_pil_image, filtered_list_tup, d_map_pred, lane_detect_
 
 # %% [markdown]
 # TODO: 
-# - Upsample lane detection points and image
 # - Flood fill/threshold to get binary image or similar that can be used to determine lane width
+# - May want to just fit line to lane detections in the bottom of the image
 # - Determine crack width in terms of lane width, use some heuristics especially if a detected lane cannot be determined to give rough estimate or fail gracefully (maybe something to do with pixels for other non-infront lanes that were actually found) and also maybe scale height values using width since if we are given the lane width it can act as a "ruler" for the scene
 
 # %%
