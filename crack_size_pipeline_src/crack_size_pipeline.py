@@ -36,7 +36,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision
-import torchvision.transforms.functional as F
+# import torchvision.transforms.functional as F
+import torchvision.transforms as transforms
 import torch.utils.data
 # Standard python libraries
 import random
@@ -273,11 +274,6 @@ def FasterRCNN_output_to_list_tup_bbox(out_full):
     
 
 
-# %%
-# fasterrcnn_model = torch.load(fasterrcnn_model_path)
-# fasterrcnn_model.eval()
-# print(fasterrcnn_model)
-
 # %% [markdown]
 # ## Monocular Depth Estimation
 
@@ -288,25 +284,60 @@ def FasterRCNN_output_to_list_tup_bbox(out_full):
 # AdaBins Monocular Depth for Monocular Depth Estimation
 adabins_src_root = './AdaBins'
 insert_to_path_if_necessary(adabins_src_root)
-from infer import InferenceHelper
+from models.unet_adaptive_bins import UnetAdaptiveBins
+from model_io import load_checkpoint
 
 
 # %%
-def adabins_predict_pil_anysize(infer_helper, pil_image, prediction_dimensions):
+def adabins_predict(model, image_tensor, device, min_depth, max_depth):
+    bins, pred = model(image_tensor)
+    pred = np.clip(pred.cpu().numpy(), min_depth, max_depth)
+
+    # Flip
+    flip_image_tensor = torch.Tensor(np.array(image_tensor.cpu().numpy())[..., ::-1].copy()).to(device)
+    pred_lr = model(flip_image_tensor)[-1]
+    pred_lr = np.clip(pred_lr.cpu().numpy()[..., ::-1], min_depth, max_depth)
+
+    # Take average of original and mirror
+    final = 0.5 * (pred + pred_lr)
+    final = nn.functional.interpolate(torch.Tensor(final), image_tensor.shape[-2:],mode='bilinear', align_corners=True).cpu().numpy()
+
+    final[final < min_depth] = min_depth
+    final[final > max_depth] = max_depth
+    final[np.isinf(final)] = max_depth
+    final[np.isnan(final)] = min_depth
+
+    centers = 0.5 * (bins[:, 1:] + bins[:, :-1])
+    centers = centers.cpu().squeeze().numpy()
+    centers = centers[centers > min_depth]
+    centers = centers[centers < max_depth]
+
+    return centers, final
+
+def adabins_predict_pil_anysize(model, normalizer, pil_image, prediction_dimensions, device, min_depth, max_depth):
     original_size = pil_image.size
     pil_image_resize = pil_image.resize(prediction_dimensions)
-    bin_centers, predicted_depth = infer_helper.predict_pil(pil_image_resize)
-    d_map_pred = predicted_depth[0][0]
-    d_map_pred_upsample = Image.fromarray(d_map_pred).resize(original_size) # Performs bicubic interpolation
-    return d_map_pred_upsample
+    image_resize = np.asarray(pil_image_resize) / 255.
+    image_tensor = normalizer(torch.from_numpy(image_resize.transpose((2, 0, 1)))).unsqueeze(0).float().to(device)
+    bin_centers, predicted_depth = adabins_predict(model, image_tensor, device, min_depth, max_depth)
+    dmap_pred = predicted_depth[0][0]
+    dmap_pred_upsample = Image.fromarray(dmap_pred).resize(original_size) # Performs bicubic interpolation
+    return dmap_pred_upsample
 
-def adabins_predict_and_viz(pil_image, dmap_pred, extra_plotting_func=None, cbar_min=None, cbar_max=None):
+def adabins_predict_pil_images_anysize(model, pil_images, prediction_dimensions, device, min_depth, max_depth):
+    normalizer = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    dmaps = []
+    for pil_image in pil_images:
+        dmaps.append(adabins_predict_pil_anysize(model, normalizer, pil_image, prediction_dimensions, device, min_depth, max_depth))
+    return dmaps
+
+def adabins_viz(pil_image, dmap_pred, extra_plotting_func=None, cbar_min=None, cbar_max=None):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(30,5))
 
     ax1.imshow(pil_image)
     ax1.set_title('Monocular Dashcam Image')
 
-    sns.heatmap(d_map_pred, cmap=sns.color_palette("Spectral_r", as_cmap=True), square=True, ax=ax2, vmin=cbar_min, vmax=cbar_max)
+    sns.heatmap(dmap_pred, cmap=sns.color_palette("Spectral_r", as_cmap=True), square=True, ax=ax2, vmin=cbar_min, vmax=cbar_max)
     ax2.set_title('AdaBins Predicted Depth Map (in meters)')
     
     if extra_plotting_func is not None:
@@ -320,19 +351,27 @@ def adabins_predict_and_viz(pil_image, dmap_pred, extra_plotting_func=None, cbar
     fig.show()
     plt.show()
 
-# e.g.:
-# prev_dir = os.getcwd()
-# try:
-#     os.chdir(adabins_src_root)
-#     infer_helper = InferenceHelper(dataset='kitti') # dataset='kitti' sets some parameters for training and things like min depth, max depth, and saving factor, only matters for inference so values beyond 10 meters can be predicted
-    
-#     d_map_pred = adabins_predict_pil_anysize(infer_helper, pil_img, (1241, 376))
-#     adabins_predict_and_viz(pil_img, d_map_pred, extra_plotting_func=lambda fig, ax1, ax2:ax2.set_title('AdaBins Predicted Depth Map (in meters) (resizing to kitti size of (1241, 376) for inference)'), cbar_min=0, cbar_max=60)
-        
-# finally:
-#     os.chdir(prev_dir)
-    
 
+# %%
+# test_adabins_images = [Image.open(blyncsy_image_filepaths[0]), Image.open(blyncsy_image_filepaths[1]), Image.open(blyncsy_image_filepaths[2])]
+
+# from models.unet_adaptive_bins import UnetAdaptiveBins
+# from model_io import load_checkpoint
+
+
+# min_depth = 1e-3
+# max_depth = 80
+# model = UnetAdaptiveBins.build(n_bins=256, min_val=min_depth, max_val=max_depth)
+# model, _, _ = load_checkpoint('./AdaBins/pretrained/AdaBins_kitti.pt', model)
+# model.eval()
+# model = model.to(device)
+
+# with torch.no_grad():
+#     dmaps = adabins_predict_pil_images_anysize(model, test_adabins_images, (1241, 376), device, min_depth, max_depth)
+#     for img,dmap in zip(test_adabins_images,dmaps):
+#         adabins_viz(img, dmap, extra_plotting_func=None, cbar_min=None, cbar_max=None)
+        
+        
 
 # %% [markdown]
 # ## Lane Detection
@@ -730,7 +769,7 @@ def viz_pipeline(pil_img, list_tup_bbox, dmap, lane_detect_result_image, lane_li
     ax2.legend(handles=legend_list, loc=(1.04,0))
     ax2.set_title('Size Estimation\ndetected crack bounding boxes and estimated height and width (-1 if unable to detect)\nIf width could be found, the lane lines used for lane width are plotted')
     
-    sns.heatmap(d_map_pred, cmap=sns.color_palette("Spectral_r", as_cmap=True), square=True, ax=ax3, vmin=cbar_min, vmax=cbar_max)
+    sns.heatmap(dmap, cmap=sns.color_palette("Spectral_r", as_cmap=True), square=True, ax=ax3, vmin=cbar_min, vmax=cbar_max)
 #     ax3.set_yticks([],[])
 #     ax3.set_xticks([],[])
     ax3.set_title('Adabins Depth Map')
@@ -768,15 +807,16 @@ with torch.no_grad():
 #     viz_boxes(test_blyncsy_pil_image,filtered_list_tup_bbox,n_classes=6)
 
 # AdaBins
-prev_dir = os.getcwd()
-try:
-    os.chdir(adabins_src_root)
-    infer_helper = InferenceHelper(dataset='kitti') # dataset='kitti' sets some parameters for training and things like min depth, max depth, and saving factor, only matters for inference so values beyond 10 meters can be predicted
-    d_map_pred = adabins_predict_pil_anysize(infer_helper, test_blyncsy_pil_image, (1241, 376))
-#     adabins_predict_and_viz(test_blyncsy_pil_image, d_map_pred, extra_plotting_func=lambda fig, ax1, ax2:ax2.set_title('AdaBins Predicted Depth Map (in meters) (resizing to kitti size of (1241, 376) for inference)'), cbar_min=0, cbar_max=60)
-finally:
-    os.chdir(prev_dir)
-
+min_depth = 1e-3
+max_depth = 80
+model = UnetAdaptiveBins.build(n_bins=256, min_val=min_depth, max_val=max_depth)
+model, _, _ = load_checkpoint('./AdaBins/pretrained/AdaBins_kitti.pt', model)
+model = model.to(device)
+with torch.no_grad():
+    model.eval()
+    dmaps = adabins_predict_pil_images_anysize(model, [test_blyncsy_pil_image], (1241, 376), device, min_depth, max_depth)
+    dmap_pred = dmaps[0]
+    
 # PINet
 PINet_p = PINet_params()
 PINet_p.threshold_point = 0.05
@@ -791,12 +831,12 @@ with torch.no_grad():
 
 
 # %%
-pred_heights, pred_widths, width_estimation_lane_lines = naive_crack_size_estimation(filtered_list_tup_bbox, d_map_pred, lane_lines, lane_detect_result_image.shape, lane_width_m=3, top_bottom_depth_samples=5)
+pred_heights, pred_widths, width_estimation_lane_lines = naive_crack_size_estimation(filtered_list_tup_bbox, dmap_pred, lane_lines, lane_detect_result_image.shape, lane_width_m=3, top_bottom_depth_samples=5)
 
 
 
 # %%
-viz_pipeline(test_blyncsy_pil_image, filtered_list_tup_bbox, d_map_pred, lane_detect_result_image, lane_lines, pred_heights, pred_widths, width_estimation_lane_lines, n_classes=6, cbar_min=0, cbar_max=60, figsize=(40,5))
+viz_pipeline(test_blyncsy_pil_image, filtered_list_tup_bbox, dmap_pred, lane_detect_result_image, lane_lines, pred_heights, pred_widths, width_estimation_lane_lines, n_classes=6, cbar_min=0, cbar_max=60, figsize=(40,5))
 
 
 # %% [markdown]
@@ -805,5 +845,7 @@ viz_pipeline(test_blyncsy_pil_image, filtered_list_tup_bbox, d_map_pred, lane_de
 # - Add perspective transform
 # - Try YOLO, new FasterRCNN model
 # - Vectorize Adabins prediction (will have to look at the prediction utility) and the entire pipeline, likely will have to create Datasets for loading images into tensor
+#
+# - Although don't have enough time, it would be smart to truly integrate each part of the pipeline using Pytorch and make each step ready for a batch, this would involve changing some of the post-processing operations to work with tensors but would in turn speed up pipeline and wrapping it in a Pytorch model would give a much quicker pipeline, this should be done once the pipeline is more concrete 
 
 # %%
