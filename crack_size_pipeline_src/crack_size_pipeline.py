@@ -38,8 +38,9 @@ import torch.optim as optim
 import torchvision
 import torchvision.transforms.functional as F
 import torch.utils.data
-# Standard python random library
+# Standard python libraries
 import random
+import math
 # Computer vision libraries for image manipulation
 import cv2 as cv 
 from PIL import Image
@@ -94,6 +95,9 @@ plt.imshow(plt.imread(blyncsy_image_filepaths[286]))
 plt.show()
 plt.figure()
 plt.imshow(plt.imread(blyncsy_image_filepaths[526]))
+plt.show()
+plt.figure()
+plt.imshow(plt.imread(blyncsy_image_filepaths[1148]))
 plt.show()
 
 
@@ -191,12 +195,12 @@ def ada_bins_evalaute_against_ground_truth(dmap, ground_truth, p1_collection, p2
 
 
 # %%
-def viz_boxes(pil_img, list_tup, n_classes=6):
+def viz_boxes(pil_img, list_tup_bbox, n_classes=6):
     plt.figure()
     plt.imshow(np.array(pil_img))
     cmap = get_cmap(n_classes, name='hsv_r')
-    for tup in list_tup:
-        bb, cls, prob = tup 
+    for tup_bbox in list_tup_bbox:
+        bb, cls, prob = tup_bbox 
 
         color = cmap(cls)
         x_min, y_min, x_max, y_max = bb
@@ -208,14 +212,14 @@ def viz_boxes(pil_img, list_tup, n_classes=6):
         plt.text(x_max-18, y_max, cls, fontweight='heavy', color=color)
     plt.show()
 
-def filter_list_tup(list_tup, prob_thresh):
-    filtered_list_tup = []
-    for tup in list_tup:
-        bb, cls, prob = tup 
+def filter_list_tup_bbox(list_tup_bbox, prob_thresh):
+    filtered_list_tup_bbox = []
+    for tup_bbox in list_tup_bbox:
+        bb, cls, prob = tup_bbox 
         if prob < prob_thresh:
             continue
-        filtered_list_tup.append(tup)
-    return filtered_list_tup
+        filtered_list_tup_bbox.append(tup_bbox)
+    return filtered_list_tup_bbox
 
 
 # %% [markdown]
@@ -251,21 +255,21 @@ fasterrcnn_model_path = os.path.join(fasterrcnn_src_root, 'v30-new-metrics-sampl
 
 
 # %%
-# a "list_tup" is a list of tupes containing tuples of bounding boxes of [x_min, y_min, x_max, y_max], a classification, and a probability/softmax output for the classification
+# a "list_tup_bbox" is a list of tupes containing tuples of bounding boxes of [x_min, y_min, x_max, y_max], a classification, and a probability/softmax output for the classification
 def pil_to_FasterRCNN_input_tensor(pil_img, device):
     img_arr = np.asarray(pil_img, dtype="float")/255
     FasterRCNN_input_tensor = torch.unsqueeze(torch.tensor(img_arr, device=device).movedim(2,0).float(),0)
     return FasterRCNN_input_tensor
 
-def FasterRCNN_output_to_list_tup(out_full):
+def FasterRCNN_output_to_list_tup_bbox(out_full):
     out = out_full[0]
     boxes = out['boxes'].cpu().detach().numpy()
     labels = out['labels'].cpu().detach().numpy()
     scores = out['scores'].cpu().detach().numpy()
-    list_tup = []
+    list_tup_bbox = []
     for b,l,s in zip(boxes, labels, scores):
-        list_tup.append((b,l,s))
-    return list_tup
+        list_tup_bbox.append((b,l,s))
+    return list_tup_bbox
     
 
 
@@ -347,6 +351,14 @@ PINet_src_root = './PINet_new/TuSimple'
 insert_to_path_if_necessary(PINet_src_root)
 from hourglass_network import lane_detection_network
 
+
+# %% [markdown]
+# ## On mapping from PINet output (lane line points) to lane lines
+#
+# - Clustering can be problematic for getting lane lines from lane line points since points from different lines are often clustered together. It was then necessary to perform linear regression on the clusters to get lines.
+#
+# - Linear regression can be problematic for getting lane lines from lane line points since outlier points can greatly effect the line. This also meant that it was necessary to rely on the classification of lane lines by PINet (or clustering) (unlike the hough transform which I just made PINet output all points as the same class then found lines directly) which I found to be inconsitent and highly dependent on the PINet prediction parameters.
+#
 
 # %%
 class PINet_params:
@@ -513,7 +525,7 @@ def get_lane_lines_linear_regression(x, y, y_min_max_tup=None):
             if not x_arr.size > 0:
                 continue
 
-        
+
 #         cluster_arr = np.array((i,j)).T
 #         # Compute DBSCAN
 #         cluster_arr_norm = StandardScaler().fit_transform(cluster_arr)
@@ -531,7 +543,7 @@ def get_lane_lines_linear_regression(x, y, y_min_max_tup=None):
         line_parameters_list.append((model.coef_.item(),model.intercept_.item()))
     return line_parameters_list
 
-def get_lane_lines_hough_transform(x, y, lane_img_shape, y_min_max_tup=None):
+def get_lane_lines_hough_transform(x, y, lane_img_shape, y_min_max_tup=None, line_abs_slope_min_cutoff=1e-5, line_abs_slope_max_cutoff=10000, ht_peaks_min_distance=200, ht_peaks_min_angle=30, ht_peaks_threshold=100):
     line_parameters_list = []
     for i, j in zip(x, y):
         x_arr = np.array(i).reshape(-1, 1)
@@ -549,11 +561,14 @@ def get_lane_lines_hough_transform(x, y, lane_img_shape, y_min_max_tup=None):
 #         plt.figure()
 #         plt.imshow(background, cmap=cm.gray)
         h, theta, d = hough_line(background)
-        for accum, angle, dist in zip(*hough_line_peaks(h, theta, d, min_distance=200, min_angle=30, threshold=100)):
+        for accum, angle, dist in zip(*hough_line_peaks(h, theta, d, min_distance=ht_peaks_min_distance, min_angle=ht_peaks_min_angle, threshold=ht_peaks_threshold)):
             y0 = (dist - 0 * np.cos(angle)) / np.sin(angle)
             y1 = (dist - lane_img_shape[1] * np.cos(angle)) / np.sin(angle)
 #             plt.plot((0, lane_img_shape[1]), (y0, y1), '-r')
             m = (y1-y0)/lane_img_shape[1]
+            # Continue if slope doesn't meet constraints
+            if np.abs(m) < line_abs_slope_min_cutoff or np.abs(m) > line_abs_slope_max_cutoff:
+                continue
             b = y0
             line_parameters_list.append((m,b))
 #         plt.show()
@@ -562,15 +577,16 @@ def get_lane_lines_hough_transform(x, y, lane_img_shape, y_min_max_tup=None):
 
 
 # %%
-test_blyncsy_image_filepath = blyncsy_image_filepaths[286]
-test_blyncsy_image_filepath = blyncsy_image_filepaths[155]
-test_blyncsy_image_filepath = blyncsy_image_filepaths[526]
-test_blyncsy_image_filepath = blyncsy_image_filepaths[524]
+# test_blyncsy_image_filepath = blyncsy_image_filepaths[286]
+# test_blyncsy_image_filepath = blyncsy_image_filepaths[155]
+# test_blyncsy_image_filepath = blyncsy_image_filepaths[526]
+# test_blyncsy_image_filepath = blyncsy_image_filepaths[524]
+test_blyncsy_image_filepath = blyncsy_image_filepaths[1148]
 
 test_blyncsy_pil_image = Image.open(test_blyncsy_image_filepath)
 PINet_p = PINet_params()
 PINet_p.threshold_point = 0.1
-PINet_p.threshold_instance = 1
+PINet_p.threshold_instance = 1 # Set this to 1 so hough transform determines line instances
 pin_model = lane_detection_network().to(device)
 pin_state_dict = torch.load(os.path.join(PINet_src_root, 'savefile/0_tensor(0.5242)_lane_detection_network.pkl'))
 pin_model.load_state_dict(pin_state_dict)
@@ -590,7 +606,7 @@ with torch.no_grad():
 
 plt.figure()
 plt.imshow(lane_detect_result_image)
-lane_lines = get_lane_lines_hough_transform(in_x,in_y,lane_detect_result_image.shape,  y_min_max_tup=(400, lane_detect_result_image.shape[0]-1))
+lane_lines = get_lane_lines_hough_transform(in_x,in_y,lane_detect_result_image.shape,  y_min_max_tup=(400, lane_detect_result_image.shape[0]-1), line_abs_slope_min_cutoff=0.1, line_abs_slope_max_cutoff=100, ht_peaks_min_distance=200, ht_peaks_min_angle=30, ht_peaks_threshold=170)
 x_vals = np.arange(lane_detect_result_image.shape[1], dtype=np.int)
 for line in lane_lines:
     y_vals = line[0]*x_vals + line[1]
@@ -603,43 +619,99 @@ plt.show()
 # ## Pipeline
 
 # %%
-def depth_diff(dmap_arr, coord1_min, coord1_max, coord2_const, coord1_samples):
-    coord1 = np.round(np.linspace(coord1_min, coord1_max, num=coord1_samples)).astype(int)
+def sample_dmap_along_line(dmap_arr, coord1_min, coord1_max, coord2_const, coord1_samples):
+    coord1 = np.round(np.linspace(coord1_min, coord1_max-1, num=coord1_samples)).astype(int)
     coord2 = np.full(coord1.shape, np.round(coord2_const)).astype(int)
     points = np.stack((coord1, coord2),axis=-1)
     dvals = dmap_arr[points[:,1],points[:,0]]
     return dvals
-# Get height 
-def naive_crack_height_estimation(list_tup, dmap, samples=5):
-    # a "list_tup" is a list of tupes containing tuples of bounding boxes of [x_min, y_min, x_max, y_max], a classification, and a probability/softmax output for the classification
-    height_estimation_list = []
-    for tup in list_tup:
-        dmap_arr = np.array(dmap)
-        (x_min, y_min, x_max, y_max), cls, prob = tup    
 
-        top_dvals = depth_diff(dmap_arr, x_min, x_max, y_max, samples) # m
+# Get height and width of a crack
+# Will return a -1 value for a height or width if it cannot be found using this method
+def naive_crack_size_estimation(list_tup_bbox, dmap, lane_lines, lane_img_shape, lane_width_m=3, top_bottom_depth_samples=5):
+    width_estimation_list = []
+    width_estimation_lane_lines_list = []
+    height_estimation_list = []
+
+    # a "list_tup_bbox" is a list of tupes containing tuples of bounding boxes of [x_min, y_min, x_max, y_max], a classification, and a probability/softmax output for the classification
+    for tup in list_tup_bbox: # For each bounding box
+        dmap_arr = np.array(dmap)
+        (x_min, y_min, x_max, y_max), cls, prob = tup  
         
-        bottom_dvals = depth_diff(dmap_arr, x_min, x_max, y_min, samples) # m
+        # Width estimation
+        x_mid = round((y_min+y_max)/2)
+        y_mid = round((y_min+y_max)/2)
+        left_lane_line_x = None
+        left_line = None
+        right_lane_line_x = None
+        right_line = None
+#         print("x_min:{0}, x_max:{1}".format(x_min, x_max))
+        for line in lane_lines:
+            x = (y_mid-line[1])/line[0]
+#             print(line[0])
+#             print(x)
+            if (x < 0) or (x>lane_img_shape[1]): # shape[1] is x
+                # The x is not on the image, skip this lane line
+                continue
+            # Now know that x is on image x domain
+            if x < x_min:
+                if left_lane_line_x is None or x > left_lane_line_x:
+                    left_lane_line_x = x
+                    left_line = line
+            elif x > x_max:
+                if right_lane_line_x is None or x < right_lane_line_x:
+                    right_lane_line_x = x
+                    right_line = line
+            else: # x>=x_min and x<=x_max
+                # lane goes through bbox, consider these lines automatically the closest to either 
+                if x>=x_mid:
+                    right_lane_line_x = x
+                    right_line = line
+                else: # x<x_mid
+                    left_lane_line_x = x
+                    left_line = line     
+#             print("l is: {0}, r is {1}\n\n".format(left_lane_line_x, right_lane_line_x))
+        lane_width_px = None
+        if (left_lane_line_x is None) or (right_lane_line_x is None):
+            width_estimation_list.append(-1) # Could not find two lines to give lane width
+            width_estimation_lane_lines_list.append(None)
+        else:
+            lane_width_px = right_lane_line_x - left_lane_line_x
+            bbox_width_px = x_max - x_min
+            bbox_width_in_terms_of_lane_width = bbox_width_px/lane_width_px
+            bbox_width_m = bbox_width_in_terms_of_lane_width * lane_width_m
+            width_estimation_list.append(bbox_width_m)
+            width_estimation_lane_lines_list.append((left_line, right_line))
+
+        # Height estimation
+        top_dvals = sample_dmap_along_line(dmap_arr, x_min, x_max, y_max, top_bottom_depth_samples) # m
+        bottom_dvals = sample_dmap_along_line(dmap_arr, x_min, x_max, y_min, top_bottom_depth_samples) # m
+        height_estimation_m = np.abs(np.mean(top_dvals) - np.mean(bottom_dvals)) # m
+        height_estimation_list.append(height_estimation_m)
         
-        height_estimation = np.abs(np.mean(top_dvals) - np.mean(bottom_dvals)) # m
-        height_estimation_list.append(height_estimation)
-        
-    return height_estimation_list
+    return height_estimation_list, width_estimation_list, width_estimation_lane_lines_list
+    
 
 
 # %%
-def viz_pipeline(pil_img, list_tup, dmap, lane_detect_result_image, pred_heights, pred_widths, n_classes=6, cbar_min=None, cbar_max=None):
-    plt.figure()
-    fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(30,5))
+def plot_lane_line_in_range(x_vals, line, img_shape, ax, **plot_kwargs):
+    y_vals = line[0]*x_vals + line[1]
+    idx_in_range = np.logical_and(y_vals < img_shape[0]-1, y_vals > 0)
+    ax.plot(x_vals[idx_in_range], y_vals[idx_in_range], **plot_kwargs)
+    
+def viz_pipeline(pil_img, list_tup_bbox, dmap, lane_detect_result_image, lane_lines, pred_heights, pred_widths, width_estimation_lane_lines, n_classes=6, cbar_min=None, cbar_max=None, **subplots_kwargs):
+    lane_detect_result_image_x_vals = np.arange(lane_detect_result_image.shape[1], dtype=np.int)
+    fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, **subplots_kwargs)
 
     img_arr = np.array(pil_img)
     ax1.imshow(img_arr)
+    ax1.set_title('Input Image')
     
     ax2.imshow(img_arr)
-    cmap = get_cmap(len(list_tup), name='hsv_r')
+    cmap = get_cmap(len(list_tup_bbox), name='hsv_r')
     legend_list = []
-    for i, tup in enumerate(list_tup):
-        bb, cls, prob = tup 
+    for i, tup_bbox in enumerate(list_tup_bbox):
+        bb, cls, prob = tup_bbox
         color = cmap(i)
         x_min, y_min, x_max, y_max = bb
         # bb is [x_min, y_min, x_max, y_max]
@@ -649,28 +721,37 @@ def viz_pipeline(pil_img, list_tup, dmap, lane_detect_result_image, pred_heights
         ax2.add_patch(rect)
         ax2.text(x_max-18, y_max, cls, fontweight='heavy', color=color)
         
-        patch = patches.Patch(color=color, label='Predicted Height = {0}m\nPredicted Width = {1}\n'.format(pred_heights[i], pred_widths[i]))
+        if width_estimation_lane_lines[i] is not None:
+            plot_lane_line_in_range(lane_detect_result_image_x_vals, width_estimation_lane_lines[i][0], lane_detect_result_image.shape, ax2, color=color, alpha=0.7, ls='--')
+            plot_lane_line_in_range(lane_detect_result_image_x_vals, width_estimation_lane_lines[i][1], lane_detect_result_image.shape, ax2, color=color, alpha=0.7, ls='--')
+
+        patch = patches.Patch(color=color, label='Predicted Height = {0}m\nPredicted Width = {1}m\n'.format(pred_heights[i], pred_widths[i]))
         legend_list.append(patch)
-    ax2.legend(handles=legend_list)
+    ax2.legend(handles=legend_list, loc=(1.04,0))
+    ax2.set_title('Size Estimation\ndetected crack bounding boxes and estimated height and width (-1 if unable to detect)\nIf width could be found, the lane lines used for lane width are plotted')
     
     sns.heatmap(d_map_pred, cmap=sns.color_palette("Spectral_r", as_cmap=True), square=True, ax=ax3, vmin=cbar_min, vmax=cbar_max)
-    ax3.set_yticks([],[])
-    ax3.set_xticks([],[])
+#     ax3.set_yticks([],[])
+#     ax3.set_xticks([],[])
+    ax3.set_title('Adabins Depth Map')
+    
     
     ax4.imshow(lane_detect_result_image)
-    
+    for line in lane_lines:
+        plot_lane_line_in_range(lane_detect_result_image_x_vals, line, lane_detect_result_image.shape, ax4)
+    ax4.set_title('PINet Detected Lane Line Points with Hough Transform Detected Lane Lanes')
+
     fig.tight_layout()
     fig.show()
     plt.show()
-
 
 # %%
 test_blyncsy_image_filepath = blyncsy_image_filepaths[286]
 # test_blyncsy_image_filepath = blyncsy_image_filepaths[155]
 # test_blyncsy_image_filepath = blyncsy_image_filepaths[526]
 # test_blyncsy_image_filepath = blyncsy_image_filepaths[524]
-
-
+# test_blyncsy_image_filepath = random.choice(blyncsy_image_filepaths)
+print(test_blyncsy_image_filepath)
 
 test_blyncsy_pil_image = Image.open(test_blyncsy_image_filepath)
 
@@ -681,10 +762,10 @@ with torch.no_grad():
     test_tensor = pil_to_FasterRCNN_input_tensor(test_blyncsy_pil_image, device)
     fasterrcnn_model.eval()
     out = fasterrcnn_model(test_tensor)
-    list_tup = FasterRCNN_output_to_list_tup(out)
-    filtered_list_tup = filter_list_tup(list_tup, 0.3)
-#     print(filtered_list_tup)
-#     viz_boxes(test_blyncsy_pil_image,filtered_list_tup,n_classes=6)
+    list_tup_bbox = FasterRCNN_output_to_list_tup_bbox(out)
+    filtered_list_tup_bbox = filter_list_tup_bbox(list_tup_bbox, 0.3)
+#     print(filtered_list_tup_bbox)
+#     viz_boxes(test_blyncsy_pil_image,filtered_list_tup_bbox,n_classes=6)
 
 # AdaBins
 prev_dir = os.getcwd()
@@ -693,9 +774,6 @@ try:
     infer_helper = InferenceHelper(dataset='kitti') # dataset='kitti' sets some parameters for training and things like min depth, max depth, and saving factor, only matters for inference so values beyond 10 meters can be predicted
     d_map_pred = adabins_predict_pil_anysize(infer_helper, test_blyncsy_pil_image, (1241, 376))
 #     adabins_predict_and_viz(test_blyncsy_pil_image, d_map_pred, extra_plotting_func=lambda fig, ax1, ax2:ax2.set_title('AdaBins Predicted Depth Map (in meters) (resizing to kitti size of (1241, 376) for inference)'), cbar_min=0, cbar_max=60)
-    pred_heights = naive_crack_height_estimation(filtered_list_tup, d_map_pred, samples=5)
-    pred_widths = [0]*len(filtered_list_tup)
-
 finally:
     os.chdir(prev_dir)
 
@@ -708,16 +786,24 @@ pin_model.load_state_dict(pin_state_dict)
 with torch.no_grad():
     pin_model.eval()
     in_x, in_y, lane_detect_result_image = PINet_predict_pil_anysize(pin_model, test_blyncsy_pil_image, device, p=PINet_p, give_result_image=True)
+    lane_lines = get_lane_lines_hough_transform(in_x,in_y,lane_detect_result_image.shape,  y_min_max_tup=(400, lane_detect_result_image.shape[0]-1), line_abs_slope_min_cutoff=0.1, line_abs_slope_max_cutoff=100, ht_peaks_min_distance=200, ht_peaks_min_angle=30, ht_peaks_threshold=170)
 
-    
-viz_pipeline(test_blyncsy_pil_image, filtered_list_tup, d_map_pred, lane_detect_result_image, pred_heights, pred_widths, n_classes=6, cbar_min=0, cbar_max=60)
 
+
+# %%
+pred_heights, pred_widths, width_estimation_lane_lines = naive_crack_size_estimation(filtered_list_tup_bbox, d_map_pred, lane_lines, lane_detect_result_image.shape, lane_width_m=3, top_bottom_depth_samples=5)
+
+
+
+# %%
+viz_pipeline(test_blyncsy_pil_image, filtered_list_tup_bbox, d_map_pred, lane_detect_result_image, lane_lines, pred_heights, pred_widths, width_estimation_lane_lines, n_classes=6, cbar_min=0, cbar_max=60, figsize=(40,5))
 
 
 # %% [markdown]
 # TODO: 
-# - Flood fill/threshold to get binary image or similar that can be used to determine lane width
-# - May want to just fit line to lane detections in the bottom of the image
-# - Determine crack width in terms of lane width, use some heuristics especially if a detected lane cannot be determined to give rough estimate or fail gracefully (maybe something to do with pixels for other non-infront lanes that were actually found) and also maybe scale height values using width since if we are given the lane width it can act as a "ruler" for the scene
+# - Batch prediction of images
+# - Add perspective transform
+# - Try YOLO, new FasterRCNN model
+# - Vectorize Adabins prediction (will have to look at the prediction utility) and the entire pipeline, likely will have to create Datasets for loading images into tensor
 
 # %%
