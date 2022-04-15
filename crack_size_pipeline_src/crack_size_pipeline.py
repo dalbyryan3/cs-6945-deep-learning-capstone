@@ -706,7 +706,6 @@ def naive_crack_size_estimation(list_tup_bbox, dmap, lane_lines, lane_img_shape,
 
     # a "list_tup_bbox" is a list of tupes containing tuples of bounding boxes of [x_min, y_min, x_max, y_max], a classification, and a probability/softmax output for the classification
     for tup in list_tup_bbox: # For each bounding box
-        dmap_arr = np.array(dmap)
         (x_min, y_min, x_max, y_max), cls, prob = tup  
         
         # Width estimation
@@ -763,6 +762,7 @@ def naive_crack_size_estimation(list_tup_bbox, dmap, lane_lines, lane_img_shape,
             width_estimation_lane_lines_list.append((left_line, right_line))
 
         # Height estimation
+        dmap_arr = np.array(dmap)
         top_dvals = sample_dmap_along_line(dmap_arr, x_min, x_max, y_max, top_bottom_depth_samples) # m
         bottom_dvals = sample_dmap_along_line(dmap_arr, x_min, x_max, y_min, top_bottom_depth_samples) # m
         height_estimation_m = np.abs(np.mean(top_dvals) - np.mean(bottom_dvals)) # m
@@ -891,5 +891,83 @@ for i in range(len(test_blyncsy_pil_images)):
 # - Enable multiple images through pipeline
 #
 # - Although don't have enough time, it would be smart to integrate each part of the pipeline using Pytorch and make each step ready for a batch, this would involve changing some of the post-processing operations to work with tensors but would in turn speed up pipeline and wrapping it in a Pytorch model would give a much quicker pipeline, this should be done once the pipeline is more concrete though. (Currently I am essentially using prediction batch of size 1 for each step of pipeline)
+#
+# - Restricting the angles of the possible lane lines may also produce better results
+#
+#
+
+# %% [markdown]
+# ## Perspective Transform of Bounding Boxes
+
+# %%
+perspective_transform_src = '../projection3D'
+insert_to_path_if_necessary(perspective_transform_src)
+from projection_3d_reconstruction_utils import transform as perspective_transform
+
+# %%
+
+# P is a 3*3 camera Intrinsic Matrix
+
+IntrinsicMatrix = [722.7379,0,0,0,726.1398,0,663.8862,335.0579,1] 
+IntrinsicMatrix = np.reshape(IntrinsicMatrix,(3,3))
+
+# Elements in IntrinsicMatrix: [fx,0,cx,0,fy,cy,0,0,1]
+IntrinsicMatrix = np.transpose(IntrinsicMatrix)
+
+# Extrinsic Matrix, we assume the camera is (0,0,0). So the matrix is identity + [0,0,0] translation
+ExtrinsicMatrix = [1,0,0,0,0,1,0,0,0,0,1,0]
+ExtrinsicMatrix = np.reshape(ExtrinsicMatrix,(3,4))
+
+# print(IntrinsicMatrix)
+# print(ExtrinsicMatrix)
+
+Perspective_matrix = np.matmul(IntrinsicMatrix,ExtrinsicMatrix)
+# print(Perspective_matrix)
+
+test_idx = -4
+test_idx = -5
+test_img = test_blyncsy_pil_images[test_idx]
+test_bbox = filtered_list_tup_bbox_list[test_idx]
+test_dmap = dmap_list[test_idx]
+test_dmap_arr = np.array(test_dmap)
+
+viz_boxes(test_img, test_bbox)
+for tup in test_bbox: # For each bounding box
+    (x_min, y_min, x_max, y_max), cls, prob = tup
+    print('x_min, y_min, x_max, y_max: ')
+    print(x_min, y_min, x_max, y_max)
+    control_point2D = [[int(x_min), int(y_min), test_dmap_arr[int(y_min),int(x_min)]],[int(x_max), int(y_min), test_dmap_arr[int(y_min),int(x_max)]], [int(x_min), int(y_max), test_dmap_arr[int(y_max),int(x_min)]], [int(x_max), int(y_max), test_dmap_arr[int(y_max),int(x_max)]]]
+#     print(control_point2D)
+    for i in range(len(control_point2D)):  
+        control_point2D[i][0]*=control_point2D[i][2] # Why? (I think this follows in spirit to this: https://towardsdatascience.com/inverse-projection-transformation-c866ccedef1c)-> cam_coords = K_inv @ pixel_coords * depth.flatten() -> Think similar triangles (focal length/depth proportional to pixel size on sensor/actual size (for each x and y)
+        control_point2D[i][1]*=control_point2D[i][2] # Why? (Multiplying pixel x or y by then dividing by focal length (essentially happening in inverse perspective transform) and assuming no skew etc. will essentially recover info to get a 3d points from 2d pixels)
+    control_point2D = np.array(control_point2D)
+
+    x_3d_list,y_3d_list,z_3d_list = perspective_transform(control_point2D, Perspective_matrix)
+    for i in range(len(control_point2D)):
+        if i == 0: 
+            print('top left')
+        if i == 1: 
+            print('top right')
+        if i == 2: 
+            print('bottom left')
+        if i == 3: 
+            print('bottom right')
+        print(x_3d_list[i],y_3d_list[i],z_3d_list[i])
+        
+#     print('Order of points is top left, top right, bottom left, bottom right')
+    print('Top width = {0}'.format(x_3d_list[1]-x_3d_list[0]))
+    print('Bottom width = {0}'.format(x_3d_list[3]-x_3d_list[2]))
+    print('--------\n\n')
+
+
+    
+# Multiplying (scaling) depth map does seem to effect the output...
+
+# %% [markdown]
+# Issues/Questions:
+# - Units of output? (Camera coordinates... it seems these may be meters...?  I think units are dictated by depth...)
+# - Even though camera parameters are assumed, error is not unreasonable when compared to the error likely deduced by adabins
+# - How to use to predict width and height? (Seems like will just use difference in x values to predict width as height is given by difference in depth value?)
 
 # %%
