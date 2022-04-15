@@ -67,7 +67,7 @@ print('Torch using device:', device)
 
 
 # %% [markdown]
-# ## Blyncsy Data
+# ## Blyncsy Data Visualization
 
 # %%
 blyncsy_data_path = '/cs6945share/blyncsy_data'
@@ -103,7 +103,7 @@ plt.show()
 
 
 # %% [markdown]
-# ## Utility Functions
+# ## General Utility Functions
 
 # %%
 def insert_to_path_if_necessary(path):
@@ -252,8 +252,10 @@ def filter_list_tup_bbox(list_tup_bbox, prob_thresh):
 
 # %%
 fasterrcnn_src_root = '../adithya_models/models'
-fasterrcnn_model_path = os.path.join(fasterrcnn_src_root, 'v30-new-metrics-sample-6k_full.pth')
 
+
+# %% [markdown]
+# ### FasterRCNN Prediction Utility Functions
 
 # %%
 # a "list_tup_bbox" is a list of tupes containing tuples of bounding boxes of [x_min, y_min, x_max, y_max], a classification, and a probability/softmax output for the classification
@@ -271,7 +273,16 @@ def FasterRCNN_output_to_list_tup_bbox(out_full):
     for b,l,s in zip(boxes, labels, scores):
         list_tup_bbox.append((b,l,s))
     return list_tup_bbox
-    
+
+def FasterRCNN_predict_pil_images_anysize(model, pil_images, device, filtering_threshold=0.3):
+    filtered_list_tup_bbox_list = []
+    for pil_image in pil_images:
+        image_tensor = pil_to_FasterRCNN_input_tensor(pil_image, device)
+        out = model(image_tensor)
+        list_tup_bbox = FasterRCNN_output_to_list_tup_bbox(out)
+        filtered_list_tup_bbox = filter_list_tup_bbox(list_tup_bbox, filtering_threshold)
+        filtered_list_tup_bbox_list.append(filtered_list_tup_bbox)
+    return filtered_list_tup_bbox_list
 
 
 # %% [markdown]
@@ -287,6 +298,9 @@ insert_to_path_if_necessary(adabins_src_root)
 from models.unet_adaptive_bins import UnetAdaptiveBins
 from model_io import load_checkpoint
 
+
+# %% [markdown]
+# ### AdaBins Prediction Utillity Functions
 
 # %%
 def adabins_predict(model, image_tensor, device, min_depth, max_depth):
@@ -389,34 +403,13 @@ def adabins_viz(pil_image, dmap_pred, extra_plotting_func=None, cbar_min=None, c
 PINet_src_root = './PINet_new/TuSimple'
 insert_to_path_if_necessary(PINet_src_root)
 from hourglass_network import lane_detection_network
+from parameters import Parameters
 
 
 # %% [markdown]
-# ## On mapping from PINet output (lane line points) to lane lines
-#
-# - Clustering can be problematic for getting lane lines from lane line points since points from different lines are often clustered together. It was then necessary to perform linear regression on the clusters to get lines.
-#
-# - Linear regression can be problematic for getting lane lines from lane line points since outlier points can greatly effect the line. This also meant that it was necessary to rely on the classification of lane lines by PINet (or clustering) (unlike the hough transform which I just made PINet output all points as the same class then found lines directly) which I found to be inconsitent and highly dependent on the PINet prediction parameters.
-#
+# ### PINet Utility Functions
 
 # %%
-class PINet_params:
-    def __init__(self):
-        self.x_size = 512
-        self.y_size = 256
-        self.threshold_instance = 0.08 
-        self.resize_ratio = 8    
-        self.grid_x = self.x_size//self.resize_ratio                                                                                  
-        self.grid_y = self.y_size//self.resize_ratio 
-        self.grid_location = np.zeros((self.grid_y, self.grid_x, 2)) 
-        self.threshold_point = 0.1 #0.35 #0.5 #0.57 #0.64 #0.35  
-        
-        for y in range(self.grid_y):                                                                                                    
-            for x in range(self.grid_x):                                                                                                
-                self.grid_location[y][x][0] = x                                                                                         
-                self.grid_location[y][x][1] = y  
-        self.color = [(0,0,0), (255,0,0), (0,255,0),(0,0,255),(255,255,0),(255,0,255),(0,255,255),(255,255,255),(100,255,0),(100,0,255),    (255,100,0),(0,100,255),(255,0,100),(0,255,100)] 
-
 def eliminate_fewer_points(x, y):
     # eliminate fewer points
     out_x = []
@@ -491,57 +484,17 @@ def draw_points(x, y, image, p):
             image = cv.circle(image, (int(i[index]), int(j[index])), 10, p.color[color_index], -1)
     return image
 
-def PINet_predict_pil_anysize(pin_model, pil_img, device, p=PINet_params(), give_result_image=False):
-    # PINet input should be:
-#     sample_batch_size = 1
-#     channel = 3
-#     height = 256
-#     width = 512
-#     dummy_input = torch.randn(sample_batch_size, channel, height, width)
-    img_arr = np.array(pil_img)
-    orig_xy_dims = tuple(reversed(img_arr.shape[:2])) # Flip dims to be in "xy" order
-    new_xy_dims = (512, 256)
-    pil_img_resize = pil_img.resize(new_xy_dims)
-    img_arr_resize = np.asarray(pil_img_resize, dtype="float")/255
-    PINet_input_tensor = torch.unsqueeze(torch.tensor(img_arr_resize, device=device).movedim(2,0).float(),0)
-    
-    torch.cuda.synchronize()
-    outputs, features = pin_model(PINet_input_tensor)
-    confidences, offsets, instances = outputs[-1]     
 
-    confidence = confidences[0].view(p.grid_y, p.grid_x).cpu().data.numpy()
 
-    offset = offsets[0].cpu().data.numpy()
-    offset = np.rollaxis(offset, axis=2, start=0)
-    offset = np.rollaxis(offset, axis=2, start=0)
-        
-    instance = instances[0].cpu().data.numpy()
-    instance = np.rollaxis(instance, axis=2, start=0)
-    instance = np.rollaxis(instance, axis=2, start=0)
+# %% [markdown]
+# ### Mapping from PINet Output (Lane Line Points) to Lane Lines Utility Functions
+#
+# - Clustering can be problematic for getting lane lines from lane line points since points from different lines are often clustered together. It was then necessary to perform linear regression on the clusters to get lines.
+#
+# - Linear regression can be problematic for getting lane lines from lane line points since outlier points can greatly effect the line. This also meant that it was necessary to rely on the classification of lane lines by PINet (or clustering) (unlike the hough transform which I just made PINet output all points as the same class then found lines directly) which I found to be inconsitent and highly dependent on the PINet prediction parameters.
+#
 
-    # generate point and cluster
-    raw_x, raw_y = generate_result(confidence, offset, instance, p)
-
-    # eliminate fewer points
-    in_x, in_y = eliminate_fewer_points(raw_x, raw_y)
-                
-    # sort points along y 
-    in_x, in_y = sort_along_y(in_x, in_y)  
-    
-
-    # rescale in_x and in_y to be on original image dimensions
-    scale_factor_x = orig_xy_dims[0]/new_xy_dims[0]
-    scale_factor_y = orig_xy_dims[1]/new_xy_dims[1]
-    
-    scale_in_x = [[int(j*scale_factor_x) for j in i] for i in in_x]
-    scale_in_y = [[int(j*scale_factor_y) for j in i] for i in in_y]
-    
-    if give_result_image:
-        result_image = draw_points(scale_in_x, scale_in_y, deepcopy(img_arr), p)
-        return scale_in_x, scale_in_y, result_image
-
-    return scale_in_x, scale_in_y
-
+# %%
 from sklearn.cluster import DBSCAN
 from sklearn.linear_model import LinearRegression
 import sklearn.metrics as metrics
@@ -615,15 +568,91 @@ def get_lane_lines_hough_transform(x, y, lane_img_shape, y_min_max_tup=None, lin
     return line_parameters_list
 
 
+# %% [markdown]
+# ### PINet Prediction Utility Functions
+
 # %%
-# test_blyncsy_image_filepath = blyncsy_image_filepaths[286]
+def PINet_predict_pil_anysize(pin_model, pil_img, device, PINet_params, give_result_image=False):
+    # PINet input should be:
+#     sample_batch_size = 1
+#     channel = 3
+#     height = 256
+#     width = 512
+#     dummy_input = torch.randn(sample_batch_size, channel, height, width)
+    img_arr = np.array(pil_img)
+    orig_xy_dims = tuple(reversed(img_arr.shape[:2])) # Flip dims to be in "xy" order
+    new_xy_dims = (512, 256)
+    pil_img_resize = pil_img.resize(new_xy_dims)
+    img_arr_resize = np.asarray(pil_img_resize, dtype="float")/255
+    PINet_input_tensor = torch.unsqueeze(torch.tensor(img_arr_resize, device=device).movedim(2,0).float(),0)
+    
+    torch.cuda.synchronize()
+    outputs, features = pin_model(PINet_input_tensor)
+    confidences, offsets, instances = outputs[-1]     
+
+    confidence = confidences[0].view(PINet_params.grid_y, PINet_params.grid_x).cpu().data.numpy()
+
+    offset = offsets[0].cpu().data.numpy()
+    offset = np.rollaxis(offset, axis=2, start=0)
+    offset = np.rollaxis(offset, axis=2, start=0)
+        
+    instance = instances[0].cpu().data.numpy()
+    instance = np.rollaxis(instance, axis=2, start=0)
+    instance = np.rollaxis(instance, axis=2, start=0)
+
+    # generate point and cluster
+    raw_x, raw_y = generate_result(confidence, offset, instance, PINet_params)
+
+    # eliminate fewer points
+    in_x, in_y = eliminate_fewer_points(raw_x, raw_y)
+                
+    # sort points along y 
+    in_x, in_y = sort_along_y(in_x, in_y)  
+    
+
+    # rescale in_x and in_y to be on original image dimensions
+    scale_factor_x = orig_xy_dims[0]/new_xy_dims[0]
+    scale_factor_y = orig_xy_dims[1]/new_xy_dims[1]
+    
+    scale_in_x = [[int(j*scale_factor_x) for j in i] for i in in_x]
+    scale_in_y = [[int(j*scale_factor_y) for j in i] for i in in_y]
+    
+    if give_result_image:
+        result_image = draw_points(scale_in_x, scale_in_y, deepcopy(img_arr), PINet_params)
+        return scale_in_x, scale_in_y, result_image
+
+    return scale_in_x, scale_in_y
+
+def PINet_predict_pil_images_anysize(pin_model, pil_images, device, PINet_params, give_result_images=False, y_min_max_tup=None, line_abs_slope_min_cutoff=0.1, line_abs_slope_max_cutoff=100, ht_peaks_min_distance=200, ht_peaks_min_angle=30, ht_peaks_threshold=170):
+    lane_detect_result_image_list = []
+    lane_lines_list = []
+    for pil_image in pil_images:
+        if give_result_images:
+            in_x, in_y, lane_detect_result_image = PINet_predict_pil_anysize(pin_model, pil_image, device, PINet_params, give_result_image=True)
+            lane_detect_result_image_list.append(lane_detect_result_image)
+        else:
+            in_x, in_y = PINet_predict_pil_anysize(pin_model, pil_image, device, PINet_params, give_result_image=False)
+        
+        image_shape = np.array(pil_image).shape
+        lane_lines = get_lane_lines_hough_transform(in_x, in_y, image_shape, y_min_max_tup=y_min_max_tup, line_abs_slope_min_cutoff=line_abs_slope_min_cutoff, line_abs_slope_max_cutoff=line_abs_slope_max_cutoff, ht_peaks_min_distance=ht_peaks_min_distance, ht_peaks_min_angle=ht_peaks_min_angle, ht_peaks_threshold=ht_peaks_threshold)
+        lane_lines_list.append(lane_lines)
+    if give_result_images:
+        return lane_lines_list, lane_detect_result_image_list
+    return lane_lines_list
+
+
+# %% [markdown]
+# ### Experimenting with Methods of Fitting Lane Lines to Lane Points
+
+# %%
+test_blyncsy_image_filepath = blyncsy_image_filepaths[286]
 # test_blyncsy_image_filepath = blyncsy_image_filepaths[155]
 # test_blyncsy_image_filepath = blyncsy_image_filepaths[526]
 # test_blyncsy_image_filepath = blyncsy_image_filepaths[524]
-test_blyncsy_image_filepath = blyncsy_image_filepaths[1148]
+# test_blyncsy_image_filepath = blyncsy_image_filepaths[1148]
 
 test_blyncsy_pil_image = Image.open(test_blyncsy_image_filepath)
-PINet_p = PINet_params()
+PINet_p = Parameters()
 PINet_p.threshold_point = 0.1
 PINet_p.threshold_instance = 1 # Set this to 1 so hough transform determines line instances
 pin_model = lane_detection_network().to(device)
@@ -631,7 +660,7 @@ pin_state_dict = torch.load(os.path.join(PINet_src_root, 'savefile/0_tensor(0.52
 pin_model.load_state_dict(pin_state_dict)
 with torch.no_grad():
     pin_model.eval()
-    in_x, in_y, lane_detect_result_image = PINet_predict_pil_anysize(pin_model, test_blyncsy_pil_image, device, p=PINet_p, give_result_image=True)
+    in_x, in_y, lane_detect_result_image = PINet_predict_pil_anysize(pin_model, test_blyncsy_pil_image, device, PINet_p, give_result_image=True)
 
 # plt.figure()
 # plt.imshow(lane_detect_result_image)
@@ -645,7 +674,7 @@ with torch.no_grad():
 
 plt.figure()
 plt.imshow(lane_detect_result_image)
-lane_lines = get_lane_lines_hough_transform(in_x,in_y,lane_detect_result_image.shape,  y_min_max_tup=(400, lane_detect_result_image.shape[0]-1), line_abs_slope_min_cutoff=0.1, line_abs_slope_max_cutoff=100, ht_peaks_min_distance=200, ht_peaks_min_angle=30, ht_peaks_threshold=170)
+lane_lines = get_lane_lines_hough_transform(in_x,in_y,lane_detect_result_image.shape,  y_min_max_tup=(400, lane_detect_result_image.shape[0]-1), line_abs_slope_min_cutoff=0.1, line_abs_slope_max_cutoff=100, ht_peaks_min_distance=100, ht_peaks_min_angle=30, ht_peaks_threshold=100)
 x_vals = np.arange(lane_detect_result_image.shape[1], dtype=np.int)
 for line in lane_lines:
     y_vals = line[0]*x_vals + line[1]
@@ -657,6 +686,9 @@ plt.show()
 # %% [markdown]
 # ## Pipeline
 
+# %% [markdown]
+# ### Size Estimation Utility Functions
+
 # %%
 def sample_dmap_along_line(dmap_arr, coord1_min, coord1_max, coord2_const, coord1_samples):
     coord1 = np.round(np.linspace(coord1_min, coord1_max-1, num=coord1_samples)).astype(int)
@@ -667,7 +699,7 @@ def sample_dmap_along_line(dmap_arr, coord1_min, coord1_max, coord2_const, coord
 
 # Get height and width of a crack
 # Will return a -1 value for a height or width if it cannot be found using this method
-def naive_crack_size_estimation(list_tup_bbox, dmap, lane_lines, lane_img_shape, lane_width_m=3, top_bottom_depth_samples=5):
+def naive_crack_size_estimation(list_tup_bbox, dmap, lane_lines, lane_img_shape, lane_width_m=3, top_bottom_depth_samples=5, y_min_max_tup=None):
     width_estimation_list = []
     width_estimation_lane_lines_list = []
     height_estimation_list = []
@@ -680,12 +712,20 @@ def naive_crack_size_estimation(list_tup_bbox, dmap, lane_lines, lane_img_shape,
         # Width estimation
         x_mid = round((y_min+y_max)/2)
         y_mid = round((y_min+y_max)/2)
+        
+        skip_bbox = False
+        # If bounding box is out of y_min_max_tup range then we won't try to get the depth
+        if y_min_max_tup is not None and ((y_mid < y_min_max_tup[0]) or (y_mid > y_min_max_tup[1])):
+            skip_bbox = True
+        
         left_lane_line_x = None
         left_line = None
         right_lane_line_x = None
         right_line = None
 #         print("x_min:{0}, x_max:{1}".format(x_min, x_max))
         for line in lane_lines:
+            if skip_bbox:
+                break
             x = (y_mid-line[1])/line[0]
 #             print(line[0])
 #             print(x)
@@ -711,7 +751,7 @@ def naive_crack_size_estimation(list_tup_bbox, dmap, lane_lines, lane_img_shape,
                     left_line = line     
 #             print("l is: {0}, r is {1}\n\n".format(left_lane_line_x, right_lane_line_x))
         lane_width_px = None
-        if (left_lane_line_x is None) or (right_lane_line_x is None):
+        if (left_lane_line_x is None) or (right_lane_line_x is None) or skip_bbox:
             width_estimation_list.append(-1) # Could not find two lines to give lane width
             width_estimation_lane_lines_list.append(None)
         else:
@@ -731,6 +771,9 @@ def naive_crack_size_estimation(list_tup_bbox, dmap, lane_lines, lane_img_shape,
     return height_estimation_list, width_estimation_list, width_estimation_lane_lines_list
     
 
+
+# %% [markdown]
+# ### Pipeline Visualization Utility Functions
 
 # %%
 def plot_lane_line_in_range(x_vals, line, img_shape, ax, **plot_kwargs):
@@ -784,68 +827,69 @@ def viz_pipeline(pil_img, list_tup_bbox, dmap, lane_detect_result_image, lane_li
     fig.show()
     plt.show()
 
+# %% [markdown]
+# ## Pipeline Testing
+
+# %% [markdown]
+# ### Loading Models
+
 # %%
-test_blyncsy_image_filepath = blyncsy_image_filepaths[286]
-# test_blyncsy_image_filepath = blyncsy_image_filepaths[155]
-# test_blyncsy_image_filepath = blyncsy_image_filepaths[526]
-# test_blyncsy_image_filepath = blyncsy_image_filepaths[524]
-# test_blyncsy_image_filepath = random.choice(blyncsy_image_filepaths)
-print(test_blyncsy_image_filepath)
-
-test_blyncsy_pil_image = Image.open(test_blyncsy_image_filepath)
-
 # FasterRCNN
-fasterrcnn_model = torch.load(fasterrcnn_model_path)
+fasterrcnn_model = torch.load(os.path.join(fasterrcnn_src_root, 'v30-new-metrics-sample-6k_full.pth'))
+fasterrcnn_model = fasterrcnn_model.to(device)
 fasterrcnn_model.eval()
-with torch.no_grad():
-    test_tensor = pil_to_FasterRCNN_input_tensor(test_blyncsy_pil_image, device)
-    fasterrcnn_model.eval()
-    out = fasterrcnn_model(test_tensor)
-    list_tup_bbox = FasterRCNN_output_to_list_tup_bbox(out)
-    filtered_list_tup_bbox = filter_list_tup_bbox(list_tup_bbox, 0.3)
-#     print(filtered_list_tup_bbox)
-#     viz_boxes(test_blyncsy_pil_image,filtered_list_tup_bbox,n_classes=6)
 
 # AdaBins
-min_depth = 1e-3
-max_depth = 80
-model = UnetAdaptiveBins.build(n_bins=256, min_val=min_depth, max_val=max_depth)
-model, _, _ = load_checkpoint('./AdaBins/pretrained/AdaBins_kitti.pt', model)
-model = model.to(device)
-with torch.no_grad():
-    model.eval()
-    dmaps = adabins_predict_pil_images_anysize(model, [test_blyncsy_pil_image], (1241, 376), device, min_depth, max_depth)
-    dmap_pred = dmaps[0]
-    
+adabins_min_depth = 1e-3
+adabins_max_depth = 80
+adabins_model = UnetAdaptiveBins.build(n_bins=256, min_val=adabins_min_depth, max_val=adabins_max_depth)
+adabins_model, _, _ = load_checkpoint(os.path.join(adabins_src_root, 'pretrained/AdaBins_kitti.pt'), adabins_model)
+adabins_model = adabins_model.to(device)
+adabins_model.eval()
+
 # PINet
-PINet_p = PINet_params()
-PINet_p.threshold_point = 0.05
-pin_model = lane_detection_network().to(device)
+PINet_p = Parameters()
+PINet_p.threshold_point = 0.1
+PINet_p.threshold_instance = 1 # Set this to 1 so hough transform determines line instances
+pin_model = lane_detection_network()
+pin_model = pin_model.to(device)
 pin_state_dict = torch.load(os.path.join(PINet_src_root, 'savefile/0_tensor(0.5242)_lane_detection_network.pkl'))
 pin_model.load_state_dict(pin_state_dict)
+pin_model.eval()
+
+print('Loaded models')
+
+# %%
+test_idxs = random.choices(range(len(blyncsy_image_filepaths)), k=20)
+test_blyncsy_pil_images = [Image.open(blyncsy_image_filepaths[i]) for i in test_idxs]
+
+# Specific images to illustrate functionality
+extra_idxs = [286, 41, 264, 939, 178]
+for i in extra_idxs:
+    test_idxs.append(i)
+    test_blyncsy_pil_images.append(Image.open(blyncsy_image_filepaths[i]))
+
+test_blyncsy_image_shape = np.array(test_blyncsy_pil_images[0]).shape
 with torch.no_grad():
-    pin_model.eval()
-    in_x, in_y, lane_detect_result_image = PINet_predict_pil_anysize(pin_model, test_blyncsy_pil_image, device, p=PINet_p, give_result_image=True)
-    lane_lines = get_lane_lines_hough_transform(in_x,in_y,lane_detect_result_image.shape,  y_min_max_tup=(400, lane_detect_result_image.shape[0]-1), line_abs_slope_min_cutoff=0.1, line_abs_slope_max_cutoff=100, ht_peaks_min_distance=200, ht_peaks_min_angle=30, ht_peaks_threshold=170)
-
-
-
-# %%
-pred_heights, pred_widths, width_estimation_lane_lines = naive_crack_size_estimation(filtered_list_tup_bbox, dmap_pred, lane_lines, lane_detect_result_image.shape, lane_width_m=3, top_bottom_depth_samples=5)
-
-
+    filtered_list_tup_bbox_list = FasterRCNN_predict_pil_images_anysize(fasterrcnn_model, test_blyncsy_pil_images, device, filtering_threshold=0.3)
+    dmap_list = adabins_predict_pil_images_anysize(adabins_model, test_blyncsy_pil_images, (1241, 376), device, adabins_min_depth, adabins_max_depth)
+    
+    lane_lines_list, lane_detect_result_image_list = PINet_predict_pil_images_anysize(pin_model, test_blyncsy_pil_images, device, PINet_p, give_result_images=True, y_min_max_tup=(400, test_blyncsy_image_shape[0]-1), line_abs_slope_min_cutoff=0.1, line_abs_slope_max_cutoff=100, ht_peaks_min_distance=100, ht_peaks_min_angle=30, ht_peaks_threshold=100)
+    
 
 # %%
-viz_pipeline(test_blyncsy_pil_image, filtered_list_tup_bbox, dmap_pred, lane_detect_result_image, lane_lines, pred_heights, pred_widths, width_estimation_lane_lines, n_classes=6, cbar_min=0, cbar_max=60, figsize=(40,5))
-
+for i in range(len(test_blyncsy_pil_images)):
+    print(test_idxs[i])
+    pred_heights, pred_widths, width_estimation_lane_lines = naive_crack_size_estimation(filtered_list_tup_bbox_list[i], dmap_list[i], lane_lines_list[i], test_blyncsy_image_shape, lane_width_m=3, top_bottom_depth_samples=5, y_min_max_tup=(400, test_blyncsy_image_shape[0]-1))
+    viz_pipeline(test_blyncsy_pil_images[i], filtered_list_tup_bbox_list[i], dmap_list[i], lane_detect_result_image_list[i], lane_lines_list[i], pred_heights, pred_widths, width_estimation_lane_lines, n_classes=6, cbar_min=0, cbar_max=60, figsize=(40,5))
+    
 
 # %% [markdown]
 # TODO: 
-# - Batch prediction of images
 # - Add perspective transform
 # - Try YOLO, new FasterRCNN model
-# - Vectorize Adabins prediction (will have to look at the prediction utility) and the entire pipeline, likely will have to create Datasets for loading images into tensor
+# - Enable multiple images through pipeline
 #
-# - Although don't have enough time, it would be smart to truly integrate each part of the pipeline using Pytorch and make each step ready for a batch, this would involve changing some of the post-processing operations to work with tensors but would in turn speed up pipeline and wrapping it in a Pytorch model would give a much quicker pipeline, this should be done once the pipeline is more concrete 
+# - Although don't have enough time, it would be smart to integrate each part of the pipeline using Pytorch and make each step ready for a batch, this would involve changing some of the post-processing operations to work with tensors but would in turn speed up pipeline and wrapping it in a Pytorch model would give a much quicker pipeline, this should be done once the pipeline is more concrete though. (Currently I am essentially using prediction batch of size 1 for each step of pipeline)
 
 # %%
