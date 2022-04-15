@@ -965,9 +965,9 @@ for tup in test_bbox: # For each bounding box
 # Multiplying (scaling) depth map does seem to effect the output...
 
 # %% [markdown]
-# Issues/Questions:
-# - Units of output? (Camera coordinates... it seems these may be meters...?  I think units are dictated by depth...)
-# - Even though camera parameters are assumed, error is not unreasonable when compared to the error likely deduced by adabins
-# - How to use to predict width and height? (Seems like will just use difference in x values to predict width as height is given by difference in depth value?)
+# Notes:
+# - Units of output? (Units are dictated by depth map, thus meters)
+# - Even though camera parameters are assumed, error is not unreasonable when compared to the error likely deduced by adabins, thus suggest improvement would be to use transfer learning to improve adabins to get depth estimation with a more accurate "scale"
+# - Will still use difference in depth values (z coordinate) for height of crack, will use both (a weighted sum) of crack width in terms of lane width and difference between inverse projection x values to give and estimate of crack width. 
 
 # %%
