@@ -237,17 +237,6 @@ def filter_list_tup_bbox(list_tup_bbox, prob_thresh):
 # ## Crack Detection
 
 # %% [markdown]
-# ### YOLOv5
-
-# %%
-# yolo_src_root = '../yolov5x weighted model'
-# yolo_model_path = os.path.join(yolo_src_root, 'yolov5x.pt') # Also'yolov5s.pt'
-
-# %%
-# yolo_model = torch.load(yolo_model_path)
-# Should load onto a yolo model object (I think this was saved as a state dict)
-
-# %% [markdown]
 # ### FasterRCNN
 
 # %%
@@ -684,6 +673,129 @@ plt.show()
 
 
 # %% [markdown]
+# ## Perspective Transform of Bounding Boxes
+# Image Space -> World Space
+
+# %% [markdown]
+# The output unit in world space should solely be determined by the units of the depth map. Let me know if this makes sense:
+#
+# Given the first equation here:
+#
+# https://stackoverflow.com/questions/31265245/extracting-3d-coordinates-given-2d-image-points-depth-map-and-camera-calibratio
+#
+# Focal length is in pixels thus the depth determines the world space output units:
+#
+# https://gamedev.stackexchange.com/questions/166993/interpreting-focal-length-in-units-of-pixels
+#
+# https://stackoverflow.com/questions/16329867/why-does-the-focal-length-in-the-camera-intrinsics-matrix-have-two-dimensions
+
+# %%
+def svd(A,b):
+  #print(A)
+  #print(b.shape)
+  try:
+     u,s,vh = np.linalg.svd(A)
+  except:
+      print("non_invertable")
+      empty_np = np.zeros(10)
+      return empty_np
+  inver_s = np.zeros((vh.shape[0],u.shape[0]))
+  for i in range(len(s)):
+    inver_s[i][i] = 1/s[i]
+    if inver_s[i][i] > 9999999:
+        inver_s[i][i] = 0
+
+  inverse_A = np.matmul(np.matrix.transpose(vh) ,np.matmul(inver_s, np.matrix.transpose(u)))
+  #print(inverse_A)
+  #print(b.shape)
+  x = np.matmul(inverse_A,b)
+  return x
+
+# conrtol_point2D is N*3 (x,y,depth), return 3 list (x,y,z)
+# return x_list[N], y_list [N], z_list[N]
+def inv_perspective_transform_from_control_point2D(control_point2D, Perspective_matrix):
+  x_3d_list = []
+  y_3d_list = []
+  z_3d_list = []
+
+  for i in range(len(control_point2D)):
+    #2d = P*3d, x will be 4d, b will be 3d
+    temp_3d = []
+    temp_3d.append(control_point2D[i][0]) # x in image2d
+    temp_3d.append(control_point2D[i][1]) # y in image2d
+    temp_3d.append(control_point2D[i][2]) # depth value in imag
+    x = svd(Perspective_matrix,np.array(temp_3d))
+    # x will be a 4d point, represnt for x,y,z,w(homogenous coordinate)
+    # But if camera is the center, x[3] will always be zero
+    x_3d_list.append(x[0])
+    y_3d_list.append(x[1])
+    z_3d_list.append(x[2])
+  return x_3d_list,y_3d_list,z_3d_list
+
+# Will give a list of tuples where each tuple corresponds to bbox and within it has 4 tuples ((top left xyz), (top right xyz), (bottom left xyz), (bottom right xyz)) of x y z points of the bounding box corners
+def inv_perspective_transform(bbox_list_image_coords, dmap_arr, Perspective_matrix):
+    bbox_list_world_coords = []
+    for tup in bbox_list_image_coords:
+        (x_min, y_min, x_max, y_max), _, _ = tup
+        control_point2D = [[int(x_min), int(y_min), dmap_arr[int(y_min),int(x_min)]],[int(x_max), int(y_min), dmap_arr[int(y_min),int(x_max)]], [int(x_min), int(y_max), dmap_arr[int(y_max),int(x_min)]], [int(x_max), int(y_max), dmap_arr[int(y_max),int(x_max)]]]
+        for i in range(len(control_point2D)):  
+            control_point2D[i][0]*=control_point2D[i][2] # (I think this follows in spirit to this: https://towardsdatascience.com/inverse-projection-transformation-c866ccedef1c)-> cam_coords = K_inv @ pixel_coords * depth.flatten() -> Think similar triangles (focal length/depth proportional to pixel size on sensor/actual size (for each x and y)
+            control_point2D[i][1]*=control_point2D[i][2] # (Multiplying pixel x or y by then dividing by focal length (essentially happening in inverse perspective transform) and assuming no skew etc. will essentially recover info to get a 3d points from 2d pixels)
+        control_point2D = np.array(control_point2D)
+
+        x_3d_list,y_3d_list,z_3d_list = inv_perspective_transform_from_control_point2D(control_point2D, Perspective_matrix)    
+        bbox_list_world_coords.append(((x_3d_list[0],y_3d_list[0],z_3d_list[0]), (x_3d_list[1],y_3d_list[1],z_3d_list[1]), (x_3d_list[2],y_3d_list[2],z_3d_list[2]), (x_3d_list[3],y_3d_list[3],z_3d_list[3])))
+    return bbox_list_world_coords
+
+
+# %%
+# FasterRCNN
+fasterrcnn_model = torch.load(os.path.join(fasterrcnn_src_root, 'v31-training-full_full.pth'))
+fasterrcnn_model = fasterrcnn_model.to(device)
+fasterrcnn_model.eval()
+
+# AdaBins
+adabins_model = UnetAdaptiveBins.build(n_bins=256, min_val=1e-3, max_val=80)
+adabins_model, _, _ = load_checkpoint(os.path.join(adabins_src_root, 'pretrained/AdaBins_kitti.pt'), adabins_model)
+adabins_model = adabins_model.to(device)
+adabins_model.eval()
+
+# P is a 3*3 camera Intrinsic Matrix
+IntrinsicMatrix = [722.7379,0,0,0,726.1398,0,663.8862,335.0579,1] 
+IntrinsicMatrix = np.reshape(IntrinsicMatrix,(3,3))
+
+# Elements in IntrinsicMatrix: [fx,0,cx,0,fy,cy,0,0,1]
+IntrinsicMatrix = np.transpose(IntrinsicMatrix)
+
+# Extrinsic Matrix, we assume the camera is (0,0,0). So the matrix is identity + [0,0,0] translation
+ExtrinsicMatrix = [1,0,0,0,0,1,0,0,0,0,1,0]
+ExtrinsicMatrix = np.reshape(ExtrinsicMatrix,(3,4))
+
+# print(IntrinsicMatrix)
+# print(ExtrinsicMatrix)
+
+Perspective_matrix = np.matmul(IntrinsicMatrix,ExtrinsicMatrix)
+# print(Perspective_matrix)
+
+test_idx = 286
+test_img = Image.open(blyncsy_image_filepaths[test_idx])
+with torch.no_grad():
+    test_bboxes = FasterRCNN_predict_pil_images_anysize(fasterrcnn_model, [test_img], device, filtering_threshold=0.3)[0]
+    test_dmap = adabins_predict_pil_images_anysize(adabins_model, [test_img], (1241, 376), device, 1e-3, 80)[0]
+test_dmap_arr = np.array(test_dmap)
+
+viz_boxes(test_img, test_bboxes)
+
+test_bboxes_world_space = inv_perspective_transform(test_bboxes, test_dmap_arr, Perspective_matrix)
+
+for box_world_space, box_image_space in zip(test_bboxes_world_space, test_bboxes):
+    print(box_image_space)
+    print('Top width = {0}m'.format(box_world_space[1][0]-box_world_space[0][0]))
+    print('Bottom width = {0}m'.format(box_world_space[3][0]-box_world_space[2][0]))
+    print('--------\n\n')
+
+
+# %% [markdown]
 # ## Pipeline
 
 # %% [markdown]
@@ -697,12 +809,10 @@ def sample_dmap_along_line(dmap_arr, coord1_min, coord1_max, coord2_const, coord
     dvals = dmap_arr[points[:,1],points[:,0]]
     return dvals
 
-# Get height and width of a crack
-# Will return a -1 value for a height or width if it cannot be found using this method
-def naive_crack_size_estimation(list_tup_bbox, dmap, lane_lines, lane_img_shape, lane_width_m=3, top_bottom_depth_samples=5, y_min_max_tup=None):
+# Will return a -1 value for a width if it cannot be found using this method
+def lane_width_crack_size_estimation(list_tup_bbox, lane_lines, lane_img_shape, lane_width_m=3, y_min_max_tup=None):
     width_estimation_list = []
     width_estimation_lane_lines_list = []
-    height_estimation_list = []
 
     # a "list_tup_bbox" is a list of tupes containing tuples of bounding boxes of [x_min, y_min, x_max, y_max], a classification, and a probability/softmax output for the classification
     for tup in list_tup_bbox: # For each bounding box
@@ -760,17 +870,39 @@ def naive_crack_size_estimation(list_tup_bbox, dmap, lane_lines, lane_img_shape,
             bbox_width_m = bbox_width_in_terms_of_lane_width * lane_width_m
             width_estimation_list.append(bbox_width_m)
             width_estimation_lane_lines_list.append((left_line, right_line))
+        
+    return width_estimation_list, width_estimation_lane_lines_list
 
-        # Height estimation
-        dmap_arr = np.array(dmap)
-        top_dvals = sample_dmap_along_line(dmap_arr, x_min, x_max, y_max, top_bottom_depth_samples) # m
-        bottom_dvals = sample_dmap_along_line(dmap_arr, x_min, x_max, y_min, top_bottom_depth_samples) # m
+# Get height and width of a crack (width estimated using inverse perspective transform and also by using lane width)
+# Will return a -1 value for a height or width if it cannot be found using this method
+def crack_size_estimation(list_tup_bbox, dmap, lane_lines, lane_img_shape, Perspective_matrix, top_bottom_height_estimation_samples=5, y_min_max_tup=None, lane_width_m=3):
+    dmap_arr = np.array(dmap)
+    
+    # Width estimation using lane width
+    width_estimation_using_lanes_list, width_estimation_lane_lines_list = lane_width_crack_size_estimation(list_tup_bbox, lane_lines, lane_img_shape, lane_width_m=lane_width_m, y_min_max_tup=y_min_max_tup)
+    
+    # Width estimation using inverse perspective transform with assumed camera parameters
+    width_estimation_using_inv_perspective_list = []
+    list_tup_bbox_world_coords = inv_perspective_transform(list_tup_bbox, dmap_arr, Perspective_matrix)
+    for box_world_space in list_tup_bbox_world_coords:
+        top_width = box_world_space[1][0]-box_world_space[0][0]
+        bottom_width = box_world_space[3][0]-box_world_space[2][0]
+        # Will use average of top and bottom widths as the ground truth
+        width_estimation_using_inv_perspective_list.append((top_width+bottom_width)/2)
+
+    # Height estimation using depth difference
+    height_estimation_list = []
+    for tup in list_tup_bbox: # For each bounding box
+        (x_min, y_min, x_max, y_max), cls, prob = tup 
+        top_dvals = sample_dmap_along_line(dmap_arr, x_min, x_max, y_max, top_bottom_height_estimation_samples) # m
+        bottom_dvals = sample_dmap_along_line(dmap_arr, x_min, x_max, y_min, top_bottom_height_estimation_samples) # m
         height_estimation_m = np.abs(np.mean(top_dvals) - np.mean(bottom_dvals)) # m
         height_estimation_list.append(height_estimation_m)
-        
-    return height_estimation_list, width_estimation_list, width_estimation_lane_lines_list
     
+    return height_estimation_list, width_estimation_using_inv_perspective_list, width_estimation_using_lanes_list, width_estimation_lane_lines_list 
 
+
+    
 
 # %% [markdown]
 # ### Pipeline Visualization Utility Functions
@@ -826,6 +958,44 @@ def viz_pipeline(pil_img, list_tup_bbox, dmap, lane_detect_result_image, lane_li
     fig.tight_layout()
     fig.show()
     plt.show()
+def create_width_estimation_prediction(pred_width_using_inv_perspective, pred_width_using_lane_width, inv_perspective_weight=0.5):
+    width_estimation_list = []
+    for w_invp, w_lane in zip(pred_width_using_inv_perspective, pred_width_using_lane_width):
+        if w_lane == -1:
+            width_estimation_list.append(w_invp)
+        else:
+            est = inv_perspective_weight*w_invp + (1-inv_perspective_weight)*w_lane
+            width_estimation_list.append(est)
+    return width_estimation_list
+
+
+
+# %% [markdown]
+# ## "Main" Crack Size Estimation Pipeline Function:
+
+# %%
+# Assumes all images are same size, likely could modify to take in variable sizes since inference is not per-batch but per-image. In future "tensor-izing" to allow per-batch inference would allow much faster prediction
+def full_crack_size_pipeline(pil_images_key_names, pil_images, fasterrcnn_model, adabins_model, pin_model, Perspective_matrix, device, fasterrcnn_filtering_threshold=0.3, give_viz_images=False):
+    crack_size_dict = {}
+    image_shape = np.array(pil_images[0]).shape
+    with torch.no_grad():
+        filtered_list_tup_bbox_list = FasterRCNN_predict_pil_images_anysize(fasterrcnn_model, pil_images, device, filtering_threshold=fasterrcnn_filtering_threshold)
+        dmap_list = adabins_predict_pil_images_anysize(adabins_model, pil_images, (1241, 376), device, 1e-3, 80) # More information an be found in adabins_verify_src
+        if give_viz_images:
+            lane_lines_list, lane_detect_result_image_list = PINet_predict_pil_images_anysize(pin_model, pil_images, device, PINet_p, give_result_images=True, y_min_max_tup=(400, image_shape[0]-1), line_abs_slope_min_cutoff=0.1, line_abs_slope_max_cutoff=100, ht_peaks_min_distance=100, ht_peaks_min_angle=30, ht_peaks_threshold=100)
+        else:
+            lane_lines_list = PINet_predict_pil_images_anysize(pin_model, pil_images, device, PINet_p, give_result_images=False, y_min_max_tup=(400, image_shape[0]-1), line_abs_slope_min_cutoff=0.1, line_abs_slope_max_cutoff=100, ht_peaks_min_distance=100, ht_peaks_min_angle=30, ht_peaks_threshold=100)
+        
+    for i in range(len(pil_images)):
+        pred_heights, pred_width_using_inv_perspective, pred_width_using_lane_width, width_estimation_lane_lines = crack_size_estimation(filtered_list_tup_bbox_list[i], dmap_list[i], lane_lines_list[i], image_shape, Perspective_matrix, top_bottom_height_estimation_samples=5, y_min_max_tup=(400, image_shape[0]-1), lane_width_m=3)    
+        pred_widths = create_width_estimation_prediction(pred_width_using_inv_perspective, pred_width_using_lane_width)
+        crack_size_dict[pil_images_key_names[i]] = (pred_heights, pred_widths)
+        if give_viz_images:  
+            print('Displaying visualization for pil image with key name {0}'.format(pil_images_key_names[i]))
+            viz_pipeline(test_blyncsy_pil_images[i], filtered_list_tup_bbox_list[i], dmap_list[i], lane_detect_result_image_list[i], lane_lines_list[i], pred_heights, pred_widths, width_estimation_lane_lines, n_classes=6, cbar_min=0, cbar_max=60, figsize=(40,5))
+            print('-----\n')
+    return crack_size_dict
+
 
 # %% [markdown]
 # ## Pipeline Testing
@@ -834,15 +1004,26 @@ def viz_pipeline(pil_img, list_tup_bbox, dmap, lane_detect_result_image, lane_li
 # ### Loading Models
 
 # %%
+# P is a 3*3 camera Intrinsic Matrix
+IntrinsicMatrix = [722.7379,0,0,0,726.1398,0,663.8862,335.0579,1] 
+IntrinsicMatrix = np.reshape(IntrinsicMatrix,(3,3))
+
+# Elements in IntrinsicMatrix: [fx,0,cx,0,fy,cy,0,0,1]
+IntrinsicMatrix = np.transpose(IntrinsicMatrix)
+
+# Extrinsic Matrix, we assume the camera is (0,0,0). So the matrix is identity + [0,0,0] translation
+ExtrinsicMatrix = [1,0,0,0,0,1,0,0,0,0,1,0]
+ExtrinsicMatrix = np.reshape(ExtrinsicMatrix,(3,4))
+
+Perspective_matrix = np.matmul(IntrinsicMatrix,ExtrinsicMatrix)
+
 # FasterRCNN
-fasterrcnn_model = torch.load(os.path.join(fasterrcnn_src_root, 'v30-new-metrics-sample-6k_full.pth'))
+fasterrcnn_model = torch.load(os.path.join(fasterrcnn_src_root, 'v31-training-full_full.pth'))
 fasterrcnn_model = fasterrcnn_model.to(device)
 fasterrcnn_model.eval()
 
 # AdaBins
-adabins_min_depth = 1e-3
-adabins_max_depth = 80
-adabins_model = UnetAdaptiveBins.build(n_bins=256, min_val=adabins_min_depth, max_val=adabins_max_depth)
+adabins_model = UnetAdaptiveBins.build(n_bins=256, min_val=1e-3, max_val=80)
 adabins_model, _, _ = load_checkpoint(os.path.join(adabins_src_root, 'pretrained/AdaBins_kitti.pt'), adabins_model)
 adabins_model = adabins_model.to(device)
 adabins_model.eval()
@@ -860,7 +1041,13 @@ pin_model.eval()
 print('Loaded models')
 
 # %%
+# Setup test data
+test_blyncsy_pil_images = []
+pil_images_key_names = []
+
+# Random images
 test_idxs = random.choices(range(len(blyncsy_image_filepaths)), k=20)
+pil_images_key_names = test_idxs
 test_blyncsy_pil_images = [Image.open(blyncsy_image_filepaths[i]) for i in test_idxs]
 
 # Specific images to illustrate functionality
@@ -868,106 +1055,23 @@ extra_idxs = [286, 41, 264, 939, 178]
 for i in extra_idxs:
     test_idxs.append(i)
     test_blyncsy_pil_images.append(Image.open(blyncsy_image_filepaths[i]))
-
-test_blyncsy_image_shape = np.array(test_blyncsy_pil_images[0]).shape
-with torch.no_grad():
-    filtered_list_tup_bbox_list = FasterRCNN_predict_pil_images_anysize(fasterrcnn_model, test_blyncsy_pil_images, device, filtering_threshold=0.3)
-    dmap_list = adabins_predict_pil_images_anysize(adabins_model, test_blyncsy_pil_images, (1241, 376), device, adabins_min_depth, adabins_max_depth)
-    
-    lane_lines_list, lane_detect_result_image_list = PINet_predict_pil_images_anysize(pin_model, test_blyncsy_pil_images, device, PINet_p, give_result_images=True, y_min_max_tup=(400, test_blyncsy_image_shape[0]-1), line_abs_slope_min_cutoff=0.1, line_abs_slope_max_cutoff=100, ht_peaks_min_distance=100, ht_peaks_min_angle=30, ht_peaks_threshold=100)
-    
+    pil_images_key_names.append(i)
 
 # %%
-for i in range(len(test_blyncsy_pil_images)):
-    print(test_idxs[i])
-    pred_heights, pred_widths, width_estimation_lane_lines = naive_crack_size_estimation(filtered_list_tup_bbox_list[i], dmap_list[i], lane_lines_list[i], test_blyncsy_image_shape, lane_width_m=3, top_bottom_depth_samples=5, y_min_max_tup=(400, test_blyncsy_image_shape[0]-1))
-    viz_pipeline(test_blyncsy_pil_images[i], filtered_list_tup_bbox_list[i], dmap_list[i], lane_detect_result_image_list[i], lane_lines_list[i], pred_heights, pred_widths, width_estimation_lane_lines, n_classes=6, cbar_min=0, cbar_max=60, figsize=(40,5))
-    
+# With viz
+crack_size_dict = full_crack_size_pipeline(pil_images_key_names, test_blyncsy_pil_images, fasterrcnn_model, adabins_model, pin_model, Perspective_matrix, device, fasterrcnn_filtering_threshold=0.3, give_viz_images=True)
+
+
+# %%
+# Without viz
+crack_size_dict = full_crack_size_pipeline(pil_images_key_names, test_blyncsy_pil_images, fasterrcnn_model, adabins_model, pin_model, Perspective_matrix, device, fasterrcnn_filtering_threshold=0.3, give_viz_images=False)
+print(crack_size_dict)
+
 
 # %% [markdown]
-# TODO: 
-# - Add perspective transform
-# - Try YOLO, new FasterRCNN model
-# - Enable multiple images through pipeline
+# ## With more time, it would be smart to:
+# - Not develop in a Jupyter notebook, move past, split the large number of functions into members of modules and classes
+# - Integrate each part of the pipeline using Pytorch and make each step ready for a batch, this would involve changing some of the post-processing operations to work with tensors but would in turn speed up pipeline and wrapping it in a Pytorch model would give a much quicker pipeline, this should be done once the pipeline is more concrete though. (Currently I am essentially using prediction batch of size 1 for each step of pipeline)
+# - Transfer learning with AdaBins to get correctly scaled depth for the distribution of Blyncsy images
+# - Collecting sparse lidar data, cracks size ground truth, and segmented crack data in order to explore more "end-to-end" solutions and segmentation based approaches.
 #
-# - Although don't have enough time, it would be smart to integrate each part of the pipeline using Pytorch and make each step ready for a batch, this would involve changing some of the post-processing operations to work with tensors but would in turn speed up pipeline and wrapping it in a Pytorch model would give a much quicker pipeline, this should be done once the pipeline is more concrete though. (Currently I am essentially using prediction batch of size 1 for each step of pipeline)
-#
-# - Restricting the angles of the possible lane lines may also produce better results
-#
-#
-
-# %% [markdown]
-# ## Perspective Transform of Bounding Boxes
-
-# %%
-perspective_transform_src = '../projection3D'
-insert_to_path_if_necessary(perspective_transform_src)
-from projection_3d_reconstruction_utils import transform as perspective_transform
-
-# %%
-
-# P is a 3*3 camera Intrinsic Matrix
-
-IntrinsicMatrix = [722.7379,0,0,0,726.1398,0,663.8862,335.0579,1] 
-IntrinsicMatrix = np.reshape(IntrinsicMatrix,(3,3))
-
-# Elements in IntrinsicMatrix: [fx,0,cx,0,fy,cy,0,0,1]
-IntrinsicMatrix = np.transpose(IntrinsicMatrix)
-
-# Extrinsic Matrix, we assume the camera is (0,0,0). So the matrix is identity + [0,0,0] translation
-ExtrinsicMatrix = [1,0,0,0,0,1,0,0,0,0,1,0]
-ExtrinsicMatrix = np.reshape(ExtrinsicMatrix,(3,4))
-
-# print(IntrinsicMatrix)
-# print(ExtrinsicMatrix)
-
-Perspective_matrix = np.matmul(IntrinsicMatrix,ExtrinsicMatrix)
-# print(Perspective_matrix)
-
-test_idx = -4
-test_idx = -5
-test_img = test_blyncsy_pil_images[test_idx]
-test_bbox = filtered_list_tup_bbox_list[test_idx]
-test_dmap = dmap_list[test_idx]
-test_dmap_arr = np.array(test_dmap)
-
-viz_boxes(test_img, test_bbox)
-for tup in test_bbox: # For each bounding box
-    (x_min, y_min, x_max, y_max), cls, prob = tup
-    print('x_min, y_min, x_max, y_max: ')
-    print(x_min, y_min, x_max, y_max)
-    control_point2D = [[int(x_min), int(y_min), test_dmap_arr[int(y_min),int(x_min)]],[int(x_max), int(y_min), test_dmap_arr[int(y_min),int(x_max)]], [int(x_min), int(y_max), test_dmap_arr[int(y_max),int(x_min)]], [int(x_max), int(y_max), test_dmap_arr[int(y_max),int(x_max)]]]
-#     print(control_point2D)
-    for i in range(len(control_point2D)):  
-        control_point2D[i][0]*=control_point2D[i][2] # Why? (I think this follows in spirit to this: https://towardsdatascience.com/inverse-projection-transformation-c866ccedef1c)-> cam_coords = K_inv @ pixel_coords * depth.flatten() -> Think similar triangles (focal length/depth proportional to pixel size on sensor/actual size (for each x and y)
-        control_point2D[i][1]*=control_point2D[i][2] # Why? (Multiplying pixel x or y by then dividing by focal length (essentially happening in inverse perspective transform) and assuming no skew etc. will essentially recover info to get a 3d points from 2d pixels)
-    control_point2D = np.array(control_point2D)
-
-    x_3d_list,y_3d_list,z_3d_list = perspective_transform(control_point2D, Perspective_matrix)
-    for i in range(len(control_point2D)):
-        if i == 0: 
-            print('top left')
-        if i == 1: 
-            print('top right')
-        if i == 2: 
-            print('bottom left')
-        if i == 3: 
-            print('bottom right')
-        print(x_3d_list[i],y_3d_list[i],z_3d_list[i])
-        
-#     print('Order of points is top left, top right, bottom left, bottom right')
-    print('Top width = {0}'.format(x_3d_list[1]-x_3d_list[0]))
-    print('Bottom width = {0}'.format(x_3d_list[3]-x_3d_list[2]))
-    print('--------\n\n')
-
-
-    
-# Multiplying (scaling) depth map does seem to effect the output...
-
-# %% [markdown]
-# Notes:
-# - Units of output? (Units are dictated by depth map, thus meters)
-# - Even though camera parameters are assumed, error is not unreasonable when compared to the error likely deduced by adabins, thus suggest improvement would be to use transfer learning to improve adabins to get depth estimation with a more accurate "scale"
-# - Will still use difference in depth values (z coordinate) for height of crack, will use both (a weighted sum) of crack width in terms of lane width and difference between inverse projection x values to give and estimate of crack width. 
-
-# %%
