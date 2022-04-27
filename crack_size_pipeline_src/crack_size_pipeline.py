@@ -24,6 +24,7 @@
 # Basic imports for file manipulation
 import sys
 import os
+import io
 import time
 import copy
 import pickle
@@ -47,6 +48,9 @@ import cv2 as cv
 from PIL import Image
 # Seaborn for statistics and plotting 
 import seaborn as sns
+# For geo spatial dataframes
+import geopandas as gpd
+
 
 # The following are to do with interactive notebook code
 # %matplotlib inline 
@@ -737,7 +741,7 @@ def inv_perspective_transform(bbox_list_image_coords, dmap_arr, Perspective_matr
     bbox_list_world_coords = []
     for tup in bbox_list_image_coords:
         (x_min, y_min, x_max, y_max), _, _ = tup
-        control_point2D = [[int(x_min), int(y_min), dmap_arr[int(y_min),int(x_min)]],[int(x_max), int(y_min), dmap_arr[int(y_min),int(x_max)]], [int(x_min), int(y_max), dmap_arr[int(y_max),int(x_min)]], [int(x_max), int(y_max), dmap_arr[int(y_max),int(x_max)]]]
+        control_point2D = [[int(x_min), int(y_min), dmap_arr[int(y_min)-1,int(x_min)-1]],[int(x_max), int(y_min), dmap_arr[int(y_min)-1,int(x_max)-1]], [int(x_min), int(y_max), dmap_arr[int(y_max)-1,int(x_min)-1]], [int(x_max), int(y_max), dmap_arr[int(y_max)-1,int(x_max)-1]]]
         for i in range(len(control_point2D)):  
             control_point2D[i][0]*=control_point2D[i][2] # (I think this follows in spirit to this: https://towardsdatascience.com/inverse-projection-transformation-c866ccedef1c)-> cam_coords = K_inv @ pixel_coords * depth.flatten() -> Think similar triangles (focal length/depth proportional to pixel size on sensor/actual size (for each x and y)
             control_point2D[i][1]*=control_point2D[i][2] # (Multiplying pixel x or y by then dividing by focal length (essentially happening in inverse perspective transform) and assuming no skew etc. will essentially recover info to get a 3d points from 2d pixels)
@@ -913,7 +917,42 @@ def plot_lane_line_in_range(x_vals, line, img_shape, ax, **plot_kwargs):
     idx_in_range = np.logical_and(y_vals < img_shape[0]-1, y_vals > 0)
     ax.plot(x_vals[idx_in_range], y_vals[idx_in_range], **plot_kwargs)
     
-def viz_pipeline(pil_img, list_tup_bbox, dmap, lane_detect_result_image, lane_lines, pred_heights, pred_widths, width_estimation_lane_lines, n_classes=6, cbar_min=None, cbar_max=None, **subplots_kwargs):
+# From: https://stackoverflow.com/questions/57316491/how-to-convert-matplotlib-figure-to-pil-image-object-without-saving-image
+def fig2img(fig, my_dpi=96):
+    """Convert a Matplotlib figure to a PIL Image and return it"""
+    buf = io.BytesIO()
+    fig.savefig(buf, bbox_inches='tight', transparent=True, dpi=my_dpi, format='png')
+    buf.seek(0)
+    img = Image.open(buf)
+    return img
+    
+def get_viz_detection_img(pil_img, list_tup_bbox, pred_heights, pred_widths):
+    my_dpi = 96
+    fig_viz, ax_viz = plt.subplots(constrained_layout=True, figsize=(pil_img.width/my_dpi+500, pil_img.height/my_dpi), dpi=my_dpi)
+    img_arr = np.array(pil_img)
+    ax_viz.set_axis_off()
+    ax_viz.imshow(img_arr)
+    cmap = get_cmap(len(list_tup_bbox), name='hsv_r')
+    legend_list = []
+    for i, tup_bbox in enumerate(list_tup_bbox):
+        bb, cls, prob = tup_bbox
+        color = cmap(i)
+        x_min, y_min, x_max, y_max = bb
+        # bb is [x_min, y_min, x_max, y_max]
+        width = x_max-x_min
+        height = y_max-y_min
+        rect_viz = patches.Rectangle((x_min, y_min), width, height, linewidth=1, edgecolor=color, facecolor='none')
+        ax_viz.add_patch(rect_viz)
+        ax_viz.text(x_max-18, y_max, cls, fontweight='heavy', color=color)
+        patch = patches.Patch(color=color, label='Predicted Height = {0:.4f}m\nPredicted Width = {1:.4f}m\n'.format(pred_heights[i], pred_widths[i]))
+        legend_list.append(patch)
+    ax_viz.legend(handles=legend_list, loc='right', prop={'size': 20}, framealpha=0.1)
+    viz_img = fig2img(fig_viz, my_dpi=my_dpi)
+    plt.close(fig_viz)
+    
+    return viz_img
+
+def viz_pipeline(pil_img, list_tup_bbox, dmap, lane_detect_result_image, lane_lines, pred_heights, pred_widths, width_estimation_lane_lines, cbar_min=None, cbar_max=None, **subplots_kwargs):
     lane_detect_result_image_x_vals = np.arange(lane_detect_result_image.shape[1], dtype=np.int)
     fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, **subplots_kwargs)
 
@@ -934,21 +973,18 @@ def viz_pipeline(pil_img, list_tup_bbox, dmap, lane_detect_result_image, lane_li
         rect = patches.Rectangle((x_min, y_min), width, height, linewidth=1, edgecolor=color, facecolor='none')
         ax2.add_patch(rect)
         ax2.text(x_max-18, y_max, cls, fontweight='heavy', color=color)
-        
         if width_estimation_lane_lines[i] is not None:
             plot_lane_line_in_range(lane_detect_result_image_x_vals, width_estimation_lane_lines[i][0], lane_detect_result_image.shape, ax2, color=color, alpha=0.7, ls='--')
             plot_lane_line_in_range(lane_detect_result_image_x_vals, width_estimation_lane_lines[i][1], lane_detect_result_image.shape, ax2, color=color, alpha=0.7, ls='--')
-
         patch = patches.Patch(color=color, label='Predicted Height = {0}m\nPredicted Width = {1}m\n'.format(pred_heights[i], pred_widths[i]))
         legend_list.append(patch)
     ax2.legend(handles=legend_list, loc=(1.04,0))
     ax2.set_title('Size Estimation\ndetected crack bounding boxes and estimated height and width (-1 if unable to detect)\nIf width could be found, the lane lines used for lane width are plotted')
-    
+        
     sns.heatmap(dmap, cmap=sns.color_palette("Spectral_r", as_cmap=True), square=True, ax=ax3, vmin=cbar_min, vmax=cbar_max)
 #     ax3.set_yticks([],[])
 #     ax3.set_xticks([],[])
     ax3.set_title('Adabins Depth Map')
-    
     
     ax4.imshow(lane_detect_result_image)
     for line in lane_lines:
@@ -958,6 +994,7 @@ def viz_pipeline(pil_img, list_tup_bbox, dmap, lane_detect_result_image, lane_li
     fig.tight_layout()
     fig.show()
     plt.show()
+    
 def create_width_estimation_prediction(pred_width_using_inv_perspective, pred_width_using_lane_width, inv_perspective_weight=0.5):
     width_estimation_list = []
     for w_invp, w_lane in zip(pred_width_using_inv_perspective, pred_width_using_lane_width):
@@ -975,13 +1012,14 @@ def create_width_estimation_prediction(pred_width_using_inv_perspective, pred_wi
 
 # %%
 # Assumes all images are same size, likely could modify to take in variable sizes since inference is not per-batch but per-image. In future "tensor-izing" to allow per-batch inference would allow much faster prediction
-def full_crack_size_pipeline(pil_images_key_names, pil_images, fasterrcnn_model, adabins_model, pin_model, Perspective_matrix, device, fasterrcnn_filtering_threshold=0.3, give_viz_images=False):
+def full_crack_size_pipeline(pil_images_key_names, pil_images, fasterrcnn_model, adabins_model, pin_model, Perspective_matrix, device, fasterrcnn_filtering_threshold=0.3, show_viz=False):
     crack_size_dict = {}
+    viz_images_list = []
     image_shape = np.array(pil_images[0]).shape
     with torch.no_grad():
         filtered_list_tup_bbox_list = FasterRCNN_predict_pil_images_anysize(fasterrcnn_model, pil_images, device, filtering_threshold=fasterrcnn_filtering_threshold)
         dmap_list = adabins_predict_pil_images_anysize(adabins_model, pil_images, (1241, 376), device, 1e-3, 80) # More information an be found in adabins_verify_src
-        if give_viz_images:
+        if show_viz:
             lane_lines_list, lane_detect_result_image_list = PINet_predict_pil_images_anysize(pin_model, pil_images, device, PINet_p, give_result_images=True, y_min_max_tup=(400, image_shape[0]-1), line_abs_slope_min_cutoff=0.1, line_abs_slope_max_cutoff=100, ht_peaks_min_distance=100, ht_peaks_min_angle=30, ht_peaks_threshold=100)
         else:
             lane_lines_list = PINet_predict_pil_images_anysize(pin_model, pil_images, device, PINet_p, give_result_images=False, y_min_max_tup=(400, image_shape[0]-1), line_abs_slope_min_cutoff=0.1, line_abs_slope_max_cutoff=100, ht_peaks_min_distance=100, ht_peaks_min_angle=30, ht_peaks_threshold=100)
@@ -990,11 +1028,12 @@ def full_crack_size_pipeline(pil_images_key_names, pil_images, fasterrcnn_model,
         pred_heights, pred_width_using_inv_perspective, pred_width_using_lane_width, width_estimation_lane_lines = crack_size_estimation(filtered_list_tup_bbox_list[i], dmap_list[i], lane_lines_list[i], image_shape, Perspective_matrix, top_bottom_height_estimation_samples=5, y_min_max_tup=(400, image_shape[0]-1), lane_width_m=3)    
         pred_widths = create_width_estimation_prediction(pred_width_using_inv_perspective, pred_width_using_lane_width)
         crack_size_dict[pil_images_key_names[i]] = (pred_heights, pred_widths)
-        if give_viz_images:  
+        viz_images_list.append(get_viz_detection_img(pil_images[i], filtered_list_tup_bbox_list[i], pred_heights, pred_widths))
+        if show_viz:  
             print('Displaying visualization for pil image with key name {0}'.format(pil_images_key_names[i]))
-            viz_pipeline(test_blyncsy_pil_images[i], filtered_list_tup_bbox_list[i], dmap_list[i], lane_detect_result_image_list[i], lane_lines_list[i], pred_heights, pred_widths, width_estimation_lane_lines, n_classes=6, cbar_min=0, cbar_max=60, figsize=(40,5))
+            viz_pipeline(pil_images[i], filtered_list_tup_bbox_list[i], dmap_list[i], lane_detect_result_image_list[i], lane_lines_list[i], pred_heights, pred_widths, width_estimation_lane_lines, cbar_min=0, cbar_max=60, figsize=(40,5))
             print('-----\n')
-    return crack_size_dict
+    return crack_size_dict, viz_images_list
 
 
 # %% [markdown]
@@ -1046,32 +1085,153 @@ test_blyncsy_pil_images = []
 pil_images_key_names = []
 
 # Random images
-test_idxs = random.choices(range(len(blyncsy_image_filepaths)), k=20)
-pil_images_key_names = test_idxs
-test_blyncsy_pil_images = [Image.open(blyncsy_image_filepaths[i]) for i in test_idxs]
+# pil_images_key_names = random.choices(range(len(blyncsy_image_filepaths)), k=20)
+# test_blyncsy_pil_images = [Image.open(blyncsy_image_filepaths[i]) for i in pil_images_key_names]
 
 # Specific images to illustrate functionality
 extra_idxs = [286, 41, 264, 939, 178]
 for i in extra_idxs:
-    test_idxs.append(i)
     test_blyncsy_pil_images.append(Image.open(blyncsy_image_filepaths[i]))
     pil_images_key_names.append(i)
 
 # %%
 # With viz
-crack_size_dict = full_crack_size_pipeline(pil_images_key_names, test_blyncsy_pil_images, fasterrcnn_model, adabins_model, pin_model, Perspective_matrix, device, fasterrcnn_filtering_threshold=0.3, give_viz_images=True)
+crack_size_dict, _ = full_crack_size_pipeline(pil_images_key_names, test_blyncsy_pil_images, fasterrcnn_model, adabins_model, pin_model, Perspective_matrix, device, fasterrcnn_filtering_threshold=0.3, show_viz=True)
 
 
 # %%
 # Without viz
-crack_size_dict = full_crack_size_pipeline(pil_images_key_names, test_blyncsy_pil_images, fasterrcnn_model, adabins_model, pin_model, Perspective_matrix, device, fasterrcnn_filtering_threshold=0.3, give_viz_images=False)
+crack_size_dict, test = full_crack_size_pipeline(pil_images_key_names, test_blyncsy_pil_images, fasterrcnn_model, adabins_model, pin_model, Perspective_matrix, device, fasterrcnn_filtering_threshold=0.3, show_viz=False)
 print(crack_size_dict)
+plt.figure()
+plt.imshow(test[0])
+plt.show()
 
 
 # %% [markdown]
 # ## With more time, it would be smart to:
-# - Not develop in a Jupyter notebook, move past, split the large number of functions into members of modules and classes
+# - Not develop in a Jupyter notebook, split the large number of functions into members of modules and classes
 # - Integrate each part of the pipeline using Pytorch and make each step ready for a batch, this would involve changing some of the post-processing operations to work with tensors but would in turn speed up pipeline and wrapping it in a Pytorch model would give a much quicker pipeline, this should be done once the pipeline is more concrete though. (Currently I am essentially using prediction batch of size 1 for each step of pipeline)
 # - Transfer learning with AdaBins to get correctly scaled depth for the distribution of Blyncsy images
 # - Collecting sparse lidar data, cracks size ground truth, and segmented crack data in order to explore more "end-to-end" solutions and segmentation based approaches.
 #
+
+# %% [markdown]
+# # Crack Size Pipeline "Product"
+
+# %%
+# Define a function that can be used to generate image tags
+def create_im_tag(image_filename, folder_path = "/home/default/workspace/cs6945/data/barrels/images/", ws_prefix = None):
+    """Function for creating an html image tag
+
+    This function was designed to be used with a Pandas apply method.
+
+    Parameters
+    ----------
+    image_filename : str
+        a string that is the filename of an image.
+    folder_path : str
+        a string representing the path to the folder (in the workspace) where 
+        images are located. Must end in a forward slash
+    ws_prefix : str, optional
+        a string representing the workspace prefix (usually the owner's last name).
+        Must **not** have a trailing foward slash, e.g. /henderson. If this arg
+        is not provided then the function will try to determine it from the 
+        environment.
+        
+    Returns
+    -------
+    str
+        a string representing an HTML element that can show an image
+    """
+    
+    if ws_prefix is None:
+        ws_prefix = os.environ["WS_PROXY"]
+    s = ws_prefix + "/mini-browser" + folder_path + "/" + image_filename
+    html = """ \
+        <div style='width:300; height:200'> \
+            <a href='{0}' target='_blank' rel='noopener noreferrer'> \
+                <img width=100% src='{0}'/> \
+            </a> \
+        </div>
+    """.format(s)
+    return html
+
+
+# %%
+# Define the input map file
+in_map_file = os.path.join(blyncsy_data_path, 'udot/sample1/sample1.geojson')
+# Define the product map file
+out_map_file = os.path.join(blyncsy_data_path, 'udot/sample1/sample1_crack_size_est.geojson')
+
+# Load the map file into a GeoPandas object
+in_map_df = gpd.read_file(in_map_file)
+
+# Take a look at the data
+in_map_df
+
+# %%
+sample_file = os.path.join(blyncsy_data_path, 'udot/sample1/sample1_100samples.geojson')
+in_map_df.sample(n=100).to_file(sample_file)
+# Example of reducing the dataset for testing the code below:
+in_map_df = in_map_df.sample(n=100)
+
+# %%
+# This images folder should have all the images referenced in the in_map_file
+in_images_folder = os.path.join(blyncsy_data_path, 'udot/sample1/images')
+# The bounding-box (bbox) folder is where annotated images will be placed - it will be created if not exists 
+out_images_folder = os.path.join(blyncsy_data_path, "udot/sample1/images_crack_size_est")
+os.makedirs(out_images_folder, exist_ok=True)
+
+
+# %%
+# Helper function for writing progress to file
+def write_barrel_gdf(data_dict, file_path):
+    # Create the output GeoDataFrame and write to file
+    detect_df = gpd.GeoDataFrame(data_dict, geometry="geometry", crs="EPSG:4326")
+    detect_df.to_file(file_path)
+
+# Pull out the sourceIds and prepend endpoint for crack detection images
+sourceIds = in_map_df.sourceId
+num_ims = len(sourceIds)
+
+# Create a place store detections. This will become the product dataframe
+detections = []
+pil_images_product = []
+crack_size_dict_key_list =[]
+
+print("Getting images from filenames...")
+for i, sourceId in enumerate(sourceIds):
+    crack_size_dict_key_list.append(os.path.basename(sourceId))
+    # Join the image id with the folder location of the input images
+    in_im_file = os.path.join(in_images_folder, sourceId)
+    # Ensure that the file actually exists
+    if os.path.exists(in_im_file):
+        img = Image.open(in_im_file).convert("RGB")
+        pil_images_product.append(img)
+    else:
+        print("Could not locate:{0}".format(in_im_file))
+print("Done getting images from filenames...")
+
+print("Predicting crack size...")
+crack_size_dict, viz_imgs = full_crack_size_pipeline(crack_size_dict_key_list, pil_images_product, fasterrcnn_model, adabins_model, pin_model, Perspective_matrix, device, fasterrcnn_filtering_threshold=0.3, show_viz=False)
+print("Done predicting crack size...")
+
+print("Writing to geoJSON...")
+for i, (crack_size_dict_key, viz_img) in enumerate(zip(crack_size_dict, viz_imgs)):
+    if len(crack_size_dict[crack_size_dict_key][0]) > 0:
+        out_im_path = os.path.join(out_images_folder, crack_size_dict_key)
+        viz_img.convert('RGB').save(out_im_path)         
+        im_data = in_map_df.iloc[i,:].to_dict()
+        id = im_data["sourceId"]
+        # Generate a new html tag to display the image on the map. The tag that
+        # was there previously included the original image location
+        im_data["img"] = create_im_tag(crack_size_dict_key, folder_path=out_images_folder)
+        # This is also a good place to add additional elements to the infobox
+        # Not sure how to do this... would use crack_size_dict (and maybe the bounding box values) to give extra information more dynamically than just having on plot
+        detections.append(im_data)
+write_barrel_gdf(detections, out_map_file)
+print("Done writing to geoJSON...")
+
+print("Done")
+
